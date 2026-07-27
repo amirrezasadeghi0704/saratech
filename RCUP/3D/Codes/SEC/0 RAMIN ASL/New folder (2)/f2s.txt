@@ -1,0 +1,2414 @@
+/**
+ * @file f2s_goalkeeper_advanced.cpp
+ * @brief Ultra-Advanced Soccer Robot - F2S Goalkeeper v3.0
+ * @version 3.0
+ * @date 2024
+ * 
+ * Professional goalkeeper robot with advanced positioning algorithms,
+ * predictive interception, and coordinated team defense strategies.
+ */
+
+#include <Adafruit_SH1106_STM32.h>
+#include <SoftwareSerial.h>
+#include <Wire.h>
+#include <MPU6050.h>
+#include <EEPROM.h>
+
+// ============================================================================
+// GOALKEEPER-SPECIFIC CONFIGURATION
+// ============================================================================
+
+namespace Config {
+    // Performance Configuration (Optimized for goalkeeper)
+    static constexpr int MAX_MOTOR_SPEED = 50000;  // Slightly faster than v2
+    static constexpr int BASE_SPEED = 48000;
+    static constexpr float PULLBACK_MULTIPLIER = 1.4f;
+    static constexpr int MOTOR_ACCELERATION_LIMIT = 4000;
+    
+    // Goalkeeper-specific sensor thresholds
+    static constexpr int TSOP_SENSORS = 16;
+    static constexpr int COLOR_SENSORS = 4;
+    static constexpr int SENSOR_SAMPLES = 6; // More samples for goalkeeper accuracy
+    static constexpr int BALL_DETECTION_THRESHOLD = 3500;
+    static constexpr int BALL_THREAT_THRESHOLD = 3200;  // Closer threat detection
+    static constexpr int BALL_INTERCEPT_THRESHOLD = 2800;
+    static constexpr int BALL_CRITICAL_THRESHOLD = 1500;
+    static constexpr int GOAL_LINE_THRESHOLD = 3200;    // White line detection
+    static constexpr int OUTLINE_THRESHOLD = 900;
+    
+    // Advanced positioning
+    static constexpr int GOAL_WIDTH = 100;              // Goal width in units
+    static constexpr int GOAL_DEPTH = 30;               // Goal depth
+    static constexpr int MAX_GOAL_POSITION = 40;        // Max lateral movement from center
+    static constexpr int OPTIMAL_GOAL_DISTANCE = 15;    // Optimal distance from goal line
+    
+    // Prediction and interception
+    static constexpr int INTERCEPTION_LOOKAHEAD = 8;    // Prediction steps
+    static constexpr float INTERCEPTION_CONFIDENCE_MIN = 0.6f;
+    static constexpr float REACTION_TIME_MS = 150.0f;   // Goalkeeper reaction time
+    
+    // PID Controllers (Adaptive)
+    struct PIDConfig {
+        float kp, ki, kd;
+        float min_output, max_output;
+        float integral_limit;
+    };
+    
+    static constexpr PIDConfig GYRO_PID = {250.0f, 0.1f, 40.0f, -15000, 15000, 800.0f};
+    static constexpr PIDConfig POSITION_PID = {2.0f, 0.03f, 0.7f, -0.9f, 0.9f, 8.0f};
+    static constexpr PIDConfig INTERCEPT_PID = {3.0f, 0.08f, 1.0f, -1.0f, 1.0f, 15.0f};
+    
+    // Advanced timing
+    static constexpr unsigned long MAIN_LOOP_INTERVAL = 25;   // 40Hz
+    static constexpr unsigned long SENSOR_UPDATE_INTERVAL = 12; // 83Hz
+    static constexpr unsigned long AI_UPDATE_INTERVAL = 60; // 16Hz
+    static constexpr unsigned long COMM_UPDATE_INTERVAL = 35; // 28Hz
+    
+    // Communication
+    static constexpr int BLUETOOTH_BAUD = 115200;
+    static constexpr unsigned long COMM_TIMEOUT = 800;
+    static constexpr int PACKET_SIZE = 64;
+    
+    // Safety thresholds
+    static constexpr float MIN_BATTERY_VOLTAGE = 10.8f;
+    static constexpr float MAX_MOTOR_CURRENT = 4.5f;
+    static constexpr int WATCHDOG_TIMEOUT = 1200;
+    static constexpr int MAX_TEMPERATURE = 65; // Celsius
+}
+
+// ============================================================================
+// ADVANCED DATA STRUCTURES FOR GOALKEEPER
+// ============================================================================
+
+enum class GoalkeeperStateEnum : uint8_t {
+    INITIALIZING = 0, CALIBRATING, DEFENDING, TRACKING_BALL,
+    POSITIONING, INTERCEPTING, SHOOTING, RETURNING_TO_GOAL,
+    COORDINATING_DEFENSE, LEARNING_MODE, EMERGENCY_STOP,
+    MAINTENANCE_MODE, ERROR_STATE
+};
+
+enum class DefenseStrategy : uint8_t {
+    CONSERVATIVE = 0, BALANCED, AGGRESSIVE, PREDICTIVE, ADAPTIVE
+};
+
+enum class InterceptionType : uint8_t {
+    DIRECT = 0, PREDICTIVE, BLOCKING, DEFLECTION
+};
+
+struct Vector2D {
+    float x, y;
+    Vector2D(float x = 0, float y = 0) : x(x), y(y) {}
+    Vector2D operator+(const Vector2D& other) const { return Vector2D(x + other.x, y + other.y); }
+    Vector2D operator-(const Vector2D& other) const { return Vector2D(x - other.x, y - other.y); }
+    Vector2D operator*(float scalar) const { return Vector2D(x * scalar, y * scalar); }
+    float magnitude() const { return sqrt(x*x + y*y); }
+    Vector2D normalized() const { float mag = magnitude(); return mag > 0 ? Vector2D(x/mag, y/mag) : Vector2D(); }
+};
+
+struct GoalkeeperSensorData {
+    // Enhanced TSOP data
+    int tsopRaw[Config::TSOP_SENSORS];
+    int tsopFiltered[Config::TSOP_SENSORS];
+    int tsopMin = 4095;
+    int tsopNum = 0;
+    float ballThreatLevel = 0.0f;
+    Vector2D ballVector;      // Relative to robot
+    Vector2D ballVelocity;    // Relative to robot
+    
+    // Goal-specific color sensors
+    int colorRaw[Config::COLOR_SENSORS];
+    int colorCalibrated[Config::COLOR_SENSORS];
+    bool onGoalLine = false;
+    bool onOutline = false;
+    float goalLineDistance = 0.0f;
+    float outlineDistance = 0.0f;
+    
+    // Enhanced IMU data (Global position for goalkeeper)
+    float heading = 0.0f;
+    float headingRate = 0.0f;
+    Vector2D acceleration;
+    Vector2D position; // Global position on field relative to goal center
+    Vector2D velocity; // Global velocity
+    
+    // System monitoring
+    float batteryVoltage = 12.0f;
+    float motorCurrent[4] = {0};
+    float temperature = 25.0f;
+    
+    unsigned long timestamp = 0;
+    bool dataValid = true;
+};
+
+struct GoalkeeperAIState {
+    // Ball trajectory prediction
+    Vector2D ballTrajectory[Config::INTERCEPTION_LOOKAHEAD]; // Predicted positions
+    float trajectoryConfidence = 0.0f;
+    Vector2D optimalInterceptionPoint; // Global coordinates
+    float interceptionTime = 0.0f; // Time until interception
+    
+    // Defense strategy adaptation
+    DefenseStrategy currentStrategy = DefenseStrategy::BALANCED;
+    float strategyWeights[5] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    int successfulSaves = 0;
+    int totalThreats = 0;
+    
+    // Learning parameters
+    float learningRate = 0.05f;
+    int adaptationCycle = 0;
+    bool adaptiveMode = true;
+    
+    // Performance metrics
+    float savePercentage = 0.0f;
+    float positioningAccuracy = 0.0f;
+    float reactionTime = Config::REACTION_TIME_MS;
+    float energyEfficiency = 1.0f;
+};
+
+struct GoalkeeperRobotState {
+    GoalkeeperStateEnum currentState = GoalkeeperStateEnum::INITIALIZING;
+    GoalkeeperStateEnum previousState = GoalkeeperStateEnum::INITIALIZING;
+    DefenseStrategy defenseStrategy = DefenseStrategy::BALANCED;
+    
+    // Position management
+    Vector2D currentPosition;  // Global position on field
+    Vector2D targetPosition;   // Global target position
+    Vector2D goalCenter = Vector2D(0, 0); // Goal center as (0,0) reference
+    int goalCenterOffset = 0;  // Lateral offset from goal center
+    float optimalDistance = Config::OPTIMAL_GOAL_DISTANCE;
+    
+    // Ball tracking
+    Vector2D ballHistory[10]; // Global ball positions over time
+    int ballHistoryIndex = 0;
+    unsigned long lastBallTime = 0;
+    int ballLostCounter = 0;
+    
+    // Shooting system
+    unsigned long lastShootTime = 0;
+    int saveAttempts = 0;
+    int successfulSaves = 0;
+    float shooterRPM = 0.0f;
+    
+    // Emergency and safety
+    bool emergencyStop = false;
+    bool maintenanceRequired = false;
+    int errorCode = 0;
+    unsigned long lastWatchdogReset = 0;
+    
+    // Performance metrics
+    int cpuUsage = 0;
+    int memoryUsage = 0;
+    float loopFrequency = 40.0f;
+    unsigned long totalRunTime = 0;
+};
+
+// ============================================================================
+// ADVANCED PID CONTROLLER CLASS (Shared utility)
+// ============================================================================
+
+class AdvancedPIDController {
+private:
+    Config::PIDConfig config;
+    float integral = 0.0f;
+    float previousError = 0.0f;
+    float derivative = 0.0f;
+    unsigned long lastTime = 0;
+    
+    // Adaptive parameters
+    float adaptiveKp, adaptiveKi, adaptiveKd;
+    float errorHistory[5] = {0};
+    int historyIndex = 0;
+
+public:
+    AdvancedPIDController(const Config::PIDConfig& cfg) : config(cfg) {
+        adaptiveKp = config.kp;
+        adaptiveKi = config.ki;
+        adaptiveKd = config.kd;
+        lastTime = millis(); // Initialize lastTime
+    }
+    
+    float compute(float setpoint, float input, bool adaptive = true) {
+        unsigned long now = millis();
+        float deltaTime = (now - lastTime) / 1000.0f;
+        if (deltaTime <= 0) deltaTime = 0.001f; // Prevent division by zero, min 1ms
+        
+        float error = setpoint - input;
+        
+        // Adaptive parameter adjustment
+        if (adaptive) {
+            adaptParameters(error);
+        }
+        
+        // Integral with windup protection
+        integral += error * deltaTime;
+        integral = constrain(integral, -config.integral_limit, config.integral_limit);
+        
+        // Derivative with filtering
+        derivative = (error - previousError) / deltaTime;
+        
+        // PID output
+        float output = adaptiveKp * error + adaptiveKi * integral + adaptiveKd * derivative;
+        output = constrain(output, config.min_output, config.max_output);
+        
+        // Update history
+        previousError = error;
+        lastTime = now;
+        
+        return output;
+    }
+    
+    void reset() {
+        integral = 0.0f;
+        previousError = 0.0f;
+        derivative = 0.0f;
+        for (int i = 0; i < 5; i++) errorHistory[i] = 0.0f;
+    }
+    
+    void setTunings(float kp, float ki, float kd) {
+        adaptiveKp = kp;
+        adaptiveKi = ki;
+        adaptiveKd = kd;
+    }
+
+private:
+    void adaptParameters(float error) {
+        // Store error history
+        errorHistory[historyIndex] = abs(error);
+        historyIndex = (historyIndex + 1) % 5;
+        
+        // Calculate error variance
+        float mean = 0, variance = 0;
+        for (int i = 0; i < 5; i++) mean += errorHistory[i];
+        mean /= 5.0f;
+        
+        for (int i = 0; i < 5; i++) {
+            variance += pow(errorHistory[i] - mean, 2);
+        }
+        variance /= 5.0f;
+        
+        // Adapt parameters based on error characteristics
+        // Simple heuristic: higher variance -> increase Kd (dampen oscillations)
+        // larger mean error -> increase Ki (reduce steady-state error)
+        if (variance > 0.2f) { // Reduced threshold for goalkeeper's precise movements
+            adaptiveKp = config.kp * 0.9f;
+            adaptiveKd = config.kd * 1.1f;
+        } else if (mean > 0.5f) { // Reduced threshold
+            adaptiveKi = config.ki * 1.05f;
+        } else {
+            adaptiveKp = config.kp;
+            adaptiveKi = config.ki;
+            adaptiveKd = config.kd;
+        }
+    }
+};
+
+// ============================================================================
+// ADVANCED GOALKEEPER SENSOR SYSTEM
+// ============================================================================
+
+class GoalkeeperSensorSystem {
+private:
+    MPU6050 mpu;
+    
+    // Kalman filter for ball tracking
+    float ballState[4] = {0};  // [x, y, vx, vy]
+    float ballCovariance[4][4] = {{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}};
+    float processNoise = 0.15f;
+    float measurementNoise = 0.8f;
+    
+    // Sensor calibration
+    int tsopCalibration[Config::TSOP_SENSORS] = {0};
+    int colorCalibration[Config::COLOR_SENSORS] = {0};
+    bool calibrationComplete = false;
+    
+    // Advanced filtering
+    float tsopFilter[Config::TSOP_SENSORS][5] = {0};  // 5-tap FIR filter
+    float colorFilter[Config::COLOR_SENSORS][3] = {0};  // 3-tap FIR filter
+    
+    // Goal line detection
+    Vector2D goalLinePoints[4]; // Defines the goal area
+    bool goalLineCalibrated = false;
+
+public:
+    GoalkeeperSensorSystem() : mpu() {}
+
+    void initialize() {
+        Wire.begin();
+        mpu.initialize();
+        if (!mpu.testConnection()) {
+            Serial.println("MPU6050 FAILED!");
+            // Consider setting an error flag here
+        }
+        
+        loadCalibrationData();
+        resetFilters();
+        calibrateGoalLine(); // Static calibration of goal line points
+    }
+    
+    void updateSensorData(GoalkeeperSensorData& data) {
+        // Read and process TSOP sensors
+        readTSOPSensors(data);
+        
+        // Read and process color sensors
+        readColorSensors(data);
+        
+        // Update IMU with advanced filtering
+        updateIMU(data);
+        
+        // Calculate ball threat level and trajectory
+        calculateBallThreat(data); // This updates ballVector and ballVelocity
+        
+        // Update system monitoring
+        updateSystemMonitoring(data);
+        
+        data.timestamp = millis();
+        data.dataValid = true;
+    }
+    
+    void calibrateSensors() {
+        Serial.println("Calibrating sensors...");
+        // Enhanced auto-calibration with multiple environments
+        // In a real scenario, this would involve moving the robot or changing environment
+        // For simulation, we'll just take multiple samples
+        for (int i = 0; i < 150; i++) { // Total of 150 samples (3 environments * 50 samples)
+            // TSOP calibration
+            for (int j = 0; j < Config::TSOP_SENSORS; j++) {
+                // Multiplexer control
+                digitalWrite(PA8, (j & 1));
+                digitalWrite(PB1, (j & 2) >> 1);
+                digitalWrite(PC14, (j & 4) >> 2);
+                digitalWrite(PC15, (j & 8) >> 3);
+                
+                tsopCalibration[j] += analogRead(PA0);
+            }
+            
+            // Color sensor calibration
+            for (int j = 0; j < Config::COLOR_SENSORS; j++) {
+                colorCalibration[j] += analogRead(PA1 + j);
+            }
+            
+            delay(10); // Small delay between samples
+        }
+        
+        // Average and store calibration values
+        for (int i = 0; i < Config::TSOP_SENSORS; i++) {
+            tsopCalibration[i] /= 150;
+        }
+        for (int i = 0; i < Config::COLOR_SENSORS; i++) {
+            colorCalibration[i] /= 150;
+        }
+        
+        saveCalibrationData();
+        calibrationComplete = true;
+        Serial.println("Sensor calibration complete!");
+    }
+
+private:
+    void readTSOPSensors(GoalkeeperSensorData& data) {
+        data.tsopMin = 4095;
+        
+        for (int i = 0; i < Config::TSOP_SENSORS; i++) {
+            // Set multiplexer
+            digitalWrite(PA8, (i & 1));
+            digitalWrite(PB1, (i & 2) >> 1);
+            digitalWrite(PC14, (i & 4) >> 2);
+            digitalWrite(PC15, (i & 8) >> 3);
+            
+            // Multi-sampling with oversampling
+            int sum = 0;
+            for (int j = 0; j < Config::SENSOR_SAMPLES; j++) {
+                sum += analogRead(PA0);
+                delayMicroseconds(50); // Small delay to allow ADC to settle
+            }
+            data.tsopRaw[i] = sum / Config::SENSOR_SAMPLES;
+            
+            // Apply calibration (offset correction)
+            data.tsopRaw[i] -= tsopCalibration[i];
+            if (data.tsopRaw[i] < 0) data.tsopRaw[i] = 0; // Ensure non-negative
+            
+            // Apply 5-tap FIR filter for better noise reduction
+            for (int k = 4; k > 0; k--) {
+                tsopFilter[i][k] = tsopFilter[i][k-1];
+            }
+            tsopFilter[i][0] = data.tsopRaw[i];
+            
+            data.tsopFiltered[i] = (tsopFilter[i][0] * 0.4f + 
+                                   tsopFilter[i][1] * 0.25f + 
+                                   tsopFilter[i][2] * 0.2f +
+                                   tsopFilter[i][3] * 0.1f +
+                                   tsopFilter[i][4] * 0.05f);
+            
+            if (data.tsopFiltered[i] < data.tsopMin) {
+                data.tsopMin = data.tsopFiltered[i];
+                data.tsopNum = i;
+            }
+        }
+        
+        // Calculate ball threat level (0.0 = no threat, 1.0 = critical)
+        if (data.tsopMin < Config::BALL_CRITICAL_THRESHOLD) {
+            data.ballThreatLevel = 1.0f;
+        } else if (data.tsopMin < Config::BALL_INTERCEPT_THRESHOLD) {
+            data.ballThreatLevel = map(data.tsopMin, Config::BALL_CRITICAL_THRESHOLD, Config::BALL_INTERCEPT_THRESHOLD, 0.7f, 1.0f);
+            data.ballThreatLevel = constrain(data.ballThreatLevel, 0.7f, 1.0f);
+        } else if (data.tsopMin < Config::BALL_THREAT_THRESHOLD) {
+            data.ballThreatLevel = map(data.tsopMin, Config::BALL_INTERCEPT_THRESHOLD, Config::BALL_THREAT_THRESHOLD, 0.4f, 0.7f);
+            data.ballThreatLevel = constrain(data.ballThreatLevel, 0.4f, 0.7f);
+        } else {
+            data.ballThreatLevel = 0.0f;
+        }
+    }
+    
+    void readColorSensors(GoalkeeperSensorData& data) {
+        float minGoalDistance = 1000.0f;
+        float minOutlineDistance = 1000.0f;
+        
+        for (int i = 0; i < Config::COLOR_SENSORS; i++) {
+            // Enhanced sampling
+            int sum = 0;
+            for (int j = 0; j < Config::SENSOR_SAMPLES; j++) {
+                sum += analogRead(PA1 + i);
+                delayMicroseconds(30);
+            }
+            data.colorRaw[i] = sum / Config::SENSOR_SAMPLES;
+            
+            // Apply calibration and filtering
+            colorFilter[i][2] = colorFilter[i][1];
+            colorFilter[i][1] = colorFilter[i][0];
+            colorFilter[i][0] = data.colorRaw[i] - colorCalibration[i];
+            
+            data.colorCalibrated[i] = (colorFilter[i][0] * 0.7f + 
+                                      colorFilter[i][1] * 0.2f + 
+                                      colorFilter[i][2] * 0.1f);
+            
+            // Calculate distance to goal line (white) - assuming higher value for white
+            // and mapping it to a distance. Closer to 0 means right on the line.
+            if (data.colorCalibrated[i] > Config::GOAL_LINE_THRESHOLD) {
+                float distance = (4095.0f - data.colorCalibrated[i]) / (4095.0f - Config::GOAL_LINE_THRESHOLD);
+                if (distance < minGoalDistance) minGoalDistance = distance;
+            }
+            
+            // Calculate distance to outline (black) - assuming lower value for black
+            // and mapping it to a distance. Closer to 0 means right on the outline.
+            if (data.colorCalibrated[i] < Config::OUTLINE_THRESHOLD) {
+                float distance = data.colorCalibrated[i] / (float)Config::OUTLINE_THRESHOLD;
+                if (distance < minOutlineDistance) minOutlineDistance = distance;
+            }
+        }
+        
+        data.goalLineDistance = constrain(minGoalDistance, 0.0f, 1.0f); // Normalized distance 0-1
+        data.outlineDistance = constrain(minOutlineDistance, 0.0f, 1.0f); // Normalized distance 0-1
+        data.onGoalLine = (data.goalLineDistance < 0.15f); // Within a small margin of the line
+        data.onOutline = (data.outlineDistance < 0.15f); // Within a small margin of the outline
+    }
+    
+    void updateIMU(GoalkeeperSensorData& data) {
+        static MPU6050 localMpu; // Use a local MPU6050 instance for readNormalizeGyro/Accel
+        localMpu.initialize(); // Initialize it here in case it's not initialized
+        Vector normGyro = localMpu.readNormalizeGyro();
+        Vector normAccel = localMpu.readNormalizeAccel();
+        
+        // Advanced complementary filter for global position
+        static float gyroHeading = 0.0f;
+        static Vector2D lastVelocity(0, 0);
+        static unsigned long lastTime = 0;
+        
+        unsigned long now = millis();
+        float dt = (now - lastTime) / 1000.0f;
+        if (dt > 0.1f) dt = Config::MAIN_LOOP_INTERVAL / 1000.0f; // Cap dt or use main loop interval
+        
+        // Update heading based on gyroscope
+        gyroHeading += normGyro.ZAxis * dt;
+        
+        // Normalize heading
+        while (gyroHeading >= 360.0f) gyroHeading -= 360.0f;
+        while (gyroHeading < 0.0f) gyroHeading += 360.0f;
+        
+        data.heading = gyroHeading;
+        data.headingRate = normGyro.ZAxis;
+        data.acceleration = Vector2D(normAccel.XAxis, normAccel.YAxis);
+        
+        // Integrate acceleration to get velocity (with drift correction using complementary filter principles)
+        // Combine accelerometer and gyroscope data for orientation (simplified for 2D heading)
+        // For full 3D position, a proper Kalman filter involving accelerometer and magnetometer would be needed.
+        data.velocity = lastVelocity + data.acceleration * dt;
+        // Apply a small damping factor to simulate friction and reduce drift
+        data.velocity = data.velocity * 0.98f; 
+        
+        // Integrate velocity to get position
+        data.position = data.position + data.velocity * dt;
+        
+        lastVelocity = data.velocity;
+        lastTime = now;
+    }
+    
+    void calculateBallThreat(GoalkeeperSensorData& data) {
+        if (data.ballThreatLevel > 0.0f) {
+            // Convert sensor reading to ball vector (relative to robot)
+            // Sensor 0 is forward, 1-7 clockwise, 8-15 counter-clockwise
+            float angleDeg = data.tsopNum * (360.0f / Config::TSOP_SENSORS);
+            float angleRad = angleDeg * PI / 180.0f;
+            
+            // Simple distance estimation based on threat level
+            // Threat level 1.0 (very close) -> distance 0.1
+            // Threat level 0.4 (far) -> distance 1.0
+            float distance = 1.0f - (data.ballThreatLevel * 0.9f); 
+            distance = constrain(distance, 0.1f, 1.0f); // Example scaling
+            
+            data.ballVector.x = cos(angleRad) * distance;
+            data.ballVector.y = sin(angleRad) * distance;
+            
+            // Calculate ball velocity using Kalman filter (simplified)
+            updateBallKalmanFilter(data);
+        } else {
+            data.ballVector = Vector2D(0, 0);
+            data.ballVelocity = Vector2D(0, 0);
+        }
+    }
+    
+    void updateBallKalmanFilter(GoalkeeperSensorData& data) {
+        // Simplified Kalman filter for ball tracking
+        // For a full Kalman filter, we'd need matrices for state transition,
+        // control input, observation, process noise, and measurement noise.
+        // Here, we simulate by smoothing velocity and updating position.
+        
+        static Vector2D lastObservedBallPos(0, 0); // Previous observed position from TSOP
+        static unsigned long lastUpdate = 0;
+        
+        unsigned long now = millis();
+        float dt = (now - lastUpdate) / 1000.0f;
+        if (dt > 0.1f) dt = Config::SENSOR_UPDATE_INTERVAL / 1000.0f; // Cap dt or use sensor update interval
+        
+        if (dt > 0) {
+            // Predict next state (simple constant velocity model)
+            ballState[0] += ballState[2] * dt; // predicted x
+            ballState[1] += ballState[3] * dt; // predicted y
+            // No change in velocity for simple model
+            
+            // Update with measurement
+            // Use current observed ballVector as measurement
+            float measurementX = data.ballVector.x;
+            float measurementY = data.ballVector.y;
+            
+            // Simple update: blend prediction and measurement
+            ballState[0] = ballState[0] * (1 - measurementNoise) + measurementX * measurementNoise;
+            ballState[1] = ballState[1] * (1 - measurementNoise) + measurementY * measurementNoise;
+            
+            // Estimate new velocity based on smoothed positions
+            Vector2D currentSmoothedBallPos(ballState[0], ballState[1]);
+            data.ballVelocity = (currentSmoothedBallPos - lastObservedBallPos) * (1.0f / dt);
+            
+            // Update stored state for next iteration
+            ballState[2] = data.ballVelocity.x;
+            ballState[3] = data.ballVelocity.y;
+
+            lastObservedBallPos = currentSmoothedBallPos; // Store smoothed position
+        } else {
+            // If no time has passed, no velocity change. Just update last observed.
+            lastObservedBallPos = data.ballVector;
+        }
+        
+        lastUpdate = now;
+    }
+    
+    void updateSystemMonitoring(GoalkeeperSensorData& data) {
+        // Enhanced system monitoring
+        // Simulate battery voltage reading (analogRead(PA5) assumed to be connected to voltage divider)
+        data.batteryVoltage = 10.0f + (analogRead(PA5) / 4095.0f) * 4.0f; // Scale 0-4095 to 10-14V
+        data.batteryVoltage = constrain(data.batteryVoltage, 0.0f, 14.0f);
+        
+        // Simulate temperature reading (analogRead(PA6) assumed to be connected to a thermistor/temp sensor)
+        data.temperature = 20.0f + (analogRead(PA6) / 4095.0f) * 60.0f; // Scale to 20-80C
+        data.temperature = constrain(data.temperature, 0.0f, 100.0f);
+        
+        // Motor current monitoring with individual motor tracking (PA7 used for example current sensor)
+        // In a real system, each motor would have its own current sensor pin
+        for (int i = 0; i < 4; i++) {
+            // Assuming current sensor output is analog, 2048 is zero current, range is ±2A for example
+            data.motorCurrent[i] = abs(analogRead(PA7 + i) - 2048) * (2.0f / 2048.0f);
+            data.motorCurrent[i] = constrain(data.motorCurrent[i], 0.0f, 10.0f); // Max 10A
+        }
+    }
+    
+    void calibrateGoalLine() {
+        // Calibrate goal line positions for better positioning
+        // Assuming goal is centered on Y-axis (robot starts at (0, OPTIMAL_GOAL_DISTANCE) facing towards negative Y)
+        // For goalkeeper, positive Y is towards the field, negative Y is towards the goal.
+        // X-axis is lateral.
+        
+        // Goal line is assumed to be at Y=0.
+        // Left goal post (relative to robot's initial reference)
+        goalLinePoints[0] = Vector2D(-Config::GOAL_WIDTH/2.0f, 0);  
+        // Right goal post
+        goalLinePoints[1] = Vector2D(Config::GOAL_WIDTH/2.0f, 0);   
+        // Goal center back (behind the line)
+        goalLinePoints[2] = Vector2D(0, -Config::GOAL_DEPTH);    
+        // Goal center front (on the line)
+        goalLinePoints[3] = Vector2D(0, 0);                      
+        
+        goalLineCalibrated = true;
+    }
+    
+    void loadCalibrationData() {
+        // Load calibration from EEPROM (simplified example, actual EEPROM might be larger)
+        for (int i = 0; i < Config::TSOP_SENSORS; i++) {
+            tsopCalibration[i] = EEPROM.read(i * 2) | (EEPROM.read(i * 2 + 1) << 8);
+        }
+        for (int i = 0; i < Config::COLOR_SENSORS; i++) {
+            colorCalibration[i] = EEPROM.read(64 + i * 2) | (EEPROM.read(65 + i * 2) << 8);
+        }
+        calibrationComplete = (EEPROM.read(0x80) == 0xFF); // Check a flag
+    }
+    
+    void saveCalibrationData() {
+        // Save calibration to EEPROM
+        for (int i = 0; i < Config::TSOP_SENSORS; i++) {
+            EEPROM.write(i * 2, tsopCalibration[i] & 0xFF);
+            EEPROM.write(i * 2 + 1, (tsopCalibration[i] >> 8) & 0xFF);
+        }
+        for (int i = 0; i < Config::COLOR_SENSORS; i++) {
+            EEPROM.write(64 + i * 2, colorCalibration[i] & 0xFF);
+            EEPROM.write(65 + i * 2, (colorCalibration[i] >> 8) & 0xFF);
+        }
+        EEPROM.write(0x80, 0xFF); // Set calibration complete flag
+    }
+    
+    void resetFilters() {
+        for (int i = 0; i < Config::TSOP_SENSORS; i++) {
+            for (int j = 0; j < 5; j++) {
+                tsopFilter[i][j] = 0.0f;
+            }
+        }
+        for (int i = 0; i < Config::COLOR_SENSORS; i++) {
+            for (int j = 0; j < 3; j++) {
+                colorFilter[i][j] = 0.0f;
+            }
+        }
+        for (int i = 0; i < 4; i++) { // Reset Kalman filter state
+            ballState[i] = 0.0f;
+        }
+    }
+};
+
+// ============================================================================
+// GOALKEEPER HARDWARE INTERFACE
+// ============================================================================
+
+class GoalkeeperHardwareInterface {
+private:
+    Adafruit_SH1106 display;
+    SoftwareSerial bluetooth;
+    GoalkeeperSensorSystem* sensorSystem; // Pointer to sensor system
+    
+    // Motor control with acceleration limiting
+    int currentMotorSpeeds[4] = {0};
+    int targetMotorSpeeds[4] = {0};
+    unsigned long lastMotorUpdate = 0;
+    
+    // Safety monitoring
+    bool safetyEnabled = true;
+    unsigned long lastSafetyCheck = 0;
+
+public:
+    GoalkeeperHardwareInterface() : display(-1), bluetooth(PA9, PA10), sensorSystem(nullptr) {}
+    
+    void setSensorSystem(GoalkeeperSensorSystem* ss) {
+        sensorSystem = ss;
+    }
+
+    bool initialize() {
+        // Initialize display with splash screen
+        display.begin(0x2, 0x3c);
+        showSplashScreen();
+        
+        // Initialize motor pins with safety
+        initializeMotorPins();
+        
+        // Initialize sensor pins (multiplexer and analog pins)
+        initializeSensorPins();
+        
+        // Initialize Bluetooth with higher baud rate
+        bluetooth.begin(Config::BLUETOOTH_BAUD);
+        
+        // Final initialization
+        displayMessage("F2S v3.0 READY!");
+        delay(1000);
+        
+        return true;
+    }
+    
+    void setMotorSpeeds(int ml1, int ml2, int mr2, int mr1, bool pullback = false, bool immediate = false) {
+        // Apply pullback multiplier
+        if (pullback) {
+            ml1 = (int)(ml1 * Config::PULLBACK_MULTIPLIER);
+            ml2 = (int)(ml2 * Config::PULLBACK_MULTIPLIER);
+            mr1 = (int)(mr1 * Config::PULLBACK_MULTIPLIER);
+            mr2 = (int)(mr2 * Config::PULLBACK_MULTIPLIER);
+        }
+        
+        // Safety checks (clamping values)
+        if (safetyEnabled) {
+            ml1 = constrain(ml1, -Config::MAX_MOTOR_SPEED, Config::MAX_MOTOR_SPEED);
+            ml2 = constrain(ml2, -Config::MAX_MOTOR_SPEED, Config::MAX_MOTOR_SPEED);
+            mr1 = constrain(mr1, -Config::MAX_MOTOR_SPEED, Config::MAX_MOTOR_SPEED);
+            mr2 = constrain(mr2, -Config::MAX_MOTOR_SPEED, Config::MAX_MOTOR_SPEED);
+        }
+        
+        // Set target speeds
+        targetMotorSpeeds[0] = ml1; // ML1
+        targetMotorSpeeds[1] = ml2; // ML2
+        targetMotorSpeeds[2] = mr1; // MR1
+        targetMotorSpeeds[3] = mr2; // MR2
+        
+        // Apply immediately if requested or in emergency
+        if (immediate) {
+            for (int i = 0; i < 4; i++) {
+                currentMotorSpeeds[i] = targetMotorSpeeds[i];
+            }
+            updateMotorOutputs();
+        }
+    }
+    
+    void updateMotorControl() {
+        unsigned long now = millis();
+        if (now - lastMotorUpdate < 5) return; // Update motors at 200Hz
+        
+        bool changed = false;
+        
+        // Gradual acceleration limiting
+        for (int i = 0; i < 4; i++) {
+            int diff = targetMotorSpeeds[i] - currentMotorSpeeds[i];
+            if (abs(diff) > Config::MOTOR_ACCELERATION_LIMIT) {
+                currentMotorSpeeds[i] += (diff > 0) ? Config::MOTOR_ACCELERATION_LIMIT : -Config::MOTOR_ACCELERATION_LIMIT;
+                changed = true;
+            } else if (diff != 0) {
+                currentMotorSpeeds[i] = targetMotorSpeeds[i];
+                changed = true;
+            }
+        }
+        
+        if (changed) {
+            updateMotorOutputs();
+        }
+        
+        lastMotorUpdate = now;
+    }
+    
+    void setShooterSpeed(int speed, float targetRPM = 0) {
+        speed = constrain(speed, 0, Config::MAX_MOTOR_SPEED);
+        
+        // RPM-based control (simplified)
+        if (targetRPM > 0) {
+            speed = map(targetRPM, 0, 10000, 0, Config::MAX_MOTOR_SPEED); // Example mapping
+        }
+        
+        pwmWrite(PC6, speed);
+    }
+    
+    // This function will delegate to the GoalkeeperSensorSystem
+    GoalkeeperSensorData readSensors() {
+        GoalkeeperSensorData data;
+        if (sensorSystem) {
+            sensorSystem->updateSensorData(data);
+        } else {
+            Serial.println("SensorSystem not set!");
+            data.dataValid = false;
+        }
+        return data;
+    }
+    
+    void updateAdvancedDisplay(const GoalkeeperSensorData& sensors, const GoalkeeperRobotState& state, const GoalkeeperAIState& ai) {
+        static int displayPage = 0;
+        static unsigned long lastPageChange = 0;
+        
+        // Auto-rotate display pages
+        if (millis() - lastPageChange > 3000) { // Change page every 3 seconds
+            displayPage = (displayPage + 1) % 4; // 4 pages
+            lastPageChange = millis();
+        }
+        
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(WHITE);
+        
+        switch (displayPage) {
+            case 0: displayMainPage(sensors, state); break;
+            case 1: displayAIPage(ai, state); break;
+            case 2: displaySystemPage(sensors, state); break;
+            case 3: displayPerformancePage(sensors, state); break;
+        }
+        
+        // Page indicator
+        display.setCursor(120, 0);
+        display.print(displayPage + 1);
+        
+        display.display();
+    }
+    
+    String receiveBluetoothData() {
+        if (bluetooth.available()) {
+            String data = bluetooth.readString();
+            data.trim(); // Remove whitespace
+            return data;
+        }
+        return "";
+    }
+    
+    void sendBluetoothData(const String& data) {
+        // Add checksum for data integrity
+        uint16_t checksum = calculateChecksum(data);
+        bluetooth.print(data);
+        bluetooth.print("|CRC:");
+        bluetooth.println(checksum, HEX);
+    }
+    
+    void performSafetyCheck(const GoalkeeperSensorData& sensors) {
+        if (!safetyEnabled) return;
+        
+        unsigned long now = millis();
+        if (now - lastSafetyCheck < 100) return; // 10Hz safety check
+        
+        bool emergencyStop = false;
+        
+        // Battery voltage check
+        if (sensors.batteryVoltage < Config::MIN_BATTERY_VOLTAGE) {
+            emergencyStop = true;
+            Serial.println("Battery critical!");
+        }
+        
+        // Motor current check
+        for (int i = 0; i < 4; i++) {
+            if (sensors.motorCurrent[i] > Config::MAX_MOTOR_CURRENT) {
+                emergencyStop = true;
+                Serial.print("Motor "); Serial.print(i); Serial.println(" overcurrent!");
+            }
+        }
+        
+        // Temperature check
+        if (sensors.temperature > Config::MAX_TEMPERATURE) {
+            emergencyStop = true;
+            Serial.println("Overheating!");
+        }
+        
+        if (emergencyStop) {
+            setMotorSpeeds(0, 0, 0, 0, false, true); // Immediate stop
+            setShooterSpeed(0);
+            displayError("EMERGENCY STOP!");
+            // In a real system, this would also trigger an alarm or LED indicator
+        }
+        
+        lastSafetyCheck = now;
+    }
+
+private:
+    void initializeMotorPins() {
+        pinMode(PB12, OUTPUT); pinMode(PB13, OUTPUT); // Direction pins for MR1, MR2
+        pinMode(PB14, OUTPUT); pinMode(PB15, OUTPUT); // Direction pins for ML2, ML1
+        pinMode(PB9, PWM); pinMode(PB8, PWM); // PWM for ML1, ML2
+        pinMode(PB7, PWM); pinMode(PB6, PWM); // PWM for MR2, MR1
+        pinMode(PC6, PWM); // Shooter motor PWM
+        
+        // Initialize all motors to stop
+        setMotorSpeeds(0, 0, 0, 0, false, true);
+        setShooterSpeed(0);
+    }
+    
+    void initializeSensorPins() {
+        // Multiplexer control pins for TSOPs
+        pinMode(PA8, OUTPUT); 
+        pinMode(PB1, OUTPUT);
+        pinMode(PC14, OUTPUT); 
+        pinMode(PC15, OUTPUT);
+        // Analog pin for TSOP input (PA0 is ADC1_IN0)
+        // Analog pins for color sensors (PA1-PA4 are ADC1_IN1-IN4)
+        // Analog pins for battery/temp/current (PA5-PA7 are ADC1_IN5-IN7)
+        // No explicit pinMode for analogRead, they default to INPUT.
+    }
+    
+    void updateMotorOutputs() {
+        controlMotor(PB12, PB6, currentMotorSpeeds[2]);  // MR1 (front right)
+        controlMotor(PB13, PB7, currentMotorSpeeds[3]);  // MR2 (back right)
+        controlMotor(PB14, PB8, currentMotorSpeeds[1]);  // ML2 (back left)
+        controlMotor(PB15, PB9, currentMotorSpeeds[0]);  // ML1 (front left)
+    }
+    
+    void controlMotor(int dirPin, int pwmPin, int speed) {
+        if (speed >= 0) {
+            digitalWrite(dirPin, LOW); // Forward
+            pwmWrite(pwmPin, speed);
+        } else {
+            digitalWrite(dirPin, HIGH); // Reverse
+            pwmWrite(pwmPin, -speed);
+        }
+    }
+    
+    void showSplashScreen() {
+        display.clearDisplay();
+        display.setTextSize(2);
+        display.setTextColor(WHITE);
+        display.setCursor(10, 10);
+        display.print("F2S v3.0");
+        display.setTextSize(1);
+        display.setCursor(0, 35);
+        display.print("Advanced Goalkeeper");
+        display.setCursor(0, 45);
+        display.print("Robot System");
+        display.display();
+        delay(2000);
+    }
+    
+    void displayMainPage(const GoalkeeperSensorData& sensors, const GoalkeeperRobotState& state) {
+        display.setCursor(0, 0);
+        display.print("MAIN - F2S v3.0");
+        
+        display.setCursor(0, 10);
+        display.print("State: ");
+        display.print(getStateString(state.currentState));
+        
+        display.setCursor(0, 20);
+        display.print("Ball: ");
+        display.print(sensors.tsopNum);
+        display.print(" (");
+        display.print(sensors.ballThreatLevel, 2);
+        display.print(")");
+        
+        display.setCursor(0, 30);
+        display.print("Pos: X");
+        display.print(state.currentPosition.x, 1);
+        display.print(" Y");
+        display.print(state.currentPosition.y, 1);
+        
+        display.setCursor(0, 40);
+        display.print("Goal Line: ");
+        display.print(sensors.onGoalLine ? "Y" : (sensors.goalLineDistance > 0.5f ? "F" : "N"));
+        
+        display.setCursor(0, 50);
+        display.print("Loop: ");
+        display.print(state.loopFrequency, 1);
+        display.print("Hz");
+    }
+    
+    void displayAIPage(const GoalkeeperAIState& ai, const GoalkeeperRobotState& state) {
+        display.setCursor(0, 0);
+        display.print("AI - Trajectory");
+        
+        display.setCursor(0, 10);
+        display.print("Conf: ");
+        display.print(ai.trajectoryConfidence, 2);
+        display.print(" Int.T: ");
+        display.print(ai.interceptionTime, 1);
+        
+        display.setCursor(0, 20);
+        display.print("Optimal X:");
+        display.print(ai.optimalInterceptionPoint.x, 1);
+        display.print(" Y:");
+        display.print(ai.optimalInterceptionPoint.y, 1);
+        
+        display.setCursor(0, 30);
+        display.print("Strat: ");
+        display.print(getStrategyString(ai.currentStrategy));
+        
+        display.setCursor(0, 40);
+        display.print("Saves: ");
+        display.print(ai.savePercentage, 1);
+        display.print("%");
+        
+        display.setCursor(0, 50);
+        display.print("React: ");
+        display.print(ai.reactionTime, 0);
+        display.print("ms");
+    }
+    
+    void displaySystemPage(const GoalkeeperSensorData& sensors, const GoalkeeperRobotState& state) {
+        display.setCursor(0, 0);
+        display.print("SYSTEM - Monitor");
+        
+        display.setCursor(0, 10);
+        display.print("Battery: ");
+        display.print(sensors.batteryVoltage, 1);
+        display.print("V");
+        
+        display.setCursor(0, 20);
+        display.print("Temp: ");
+        display.print(sensors.temperature, 1);
+        display.print("C");
+        
+        display.setCursor(0, 30);
+        display.print("Current: ");
+        display.print(sensors.motorCurrent[0], 2); // Display only first motor current
+        display.print("A");
+        
+        display.setCursor(0, 40);
+        display.print("CPU: ");
+        display.print(state.cpuUsage);
+        display.print("% MEM: ");
+        display.print(state.memoryUsage);
+        display.print("%");
+        
+        display.setCursor(0, 50);
+        display.print("Errors: ");
+        display.print(state.errorCode);
+    }
+    
+    void displayPerformancePage(const GoalkeeperSensorData& sensors, const GoalkeeperRobotState& state) {
+        display.setCursor(0, 0);
+        display.print("PERFORMANCE");
+        
+        display.setCursor(0, 10);
+        display.print("Runtime: ");
+        display.print(millis() / 1000);
+        display.print("s");
+        
+        display.setCursor(0, 20);
+        display.print("Save Att: ");
+        display.print(state.saveAttempts);
+        display.print("/");
+        display.print(state.successfulSaves);
+        
+        display.setCursor(0, 30);
+        display.print("Ball Lost: ");
+        display.print(state.ballLostCounter);
+        
+        display.setCursor(0, 40);
+        display.print("Shooter RPM: ");
+        display.print(state.shooterRPM, 0);
+        
+        display.setCursor(0, 50);
+        display.print("Efficiency: ");
+        display.print(sensors.energyEfficiency * 100, 0);
+        display.print("%");
+    }
+    
+    void displayMessage(const String& message) {
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(WHITE);
+        display.setCursor(0, 25);
+        display.print(message);
+        display.display();
+    }
+    
+    void displayError(const String& error) {
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(WHITE);
+        display.setCursor(0, 0);
+        display.print("ERROR:");
+        display.setCursor(0, 15);
+        display.print(error);
+        display.display();
+    }
+    
+    String getStateString(GoalkeeperStateEnum state) {
+        switch (state) {
+            case GoalkeeperStateEnum::DEFENDING: return "DEFEND";
+            case GoalkeeperStateEnum::TRACKING_BALL: return "TRACK";
+            case GoalkeeperStateEnum::POSITIONING: return "POS";
+            case GoalkeeperStateEnum::INTERCEPTING: return "INTERCEPT";
+            case GoalkeeperStateEnum::SHOOTING: return "SHOOT";
+            case GoalkeeperStateEnum::RETURNING_TO_GOAL: return "RETURN";
+            case GoalkeeperStateEnum::LEARNING_MODE: return "LEARN";
+            case GoalkeeperStateEnum::EMERGENCY_STOP: return "EMERGENCY";
+            default: return "UNKNOWN";
+        }
+    }
+
+    String getStrategyString(DefenseStrategy strategy) {
+        switch (strategy) {
+            case DefenseStrategy::CONSERVATIVE: return "CONSERV";
+            case DefenseStrategy::BALANCED: return "BALANCED";
+            case DefenseStrategy::AGGRESSIVE: return "AGGRESS";
+            case DefenseStrategy::PREDICTIVE: return "PREDICT";
+            case DefenseStrategy::ADAPTIVE: return "ADAPTIVE";
+            default: return "UNKNOWN";
+        }
+    }
+    
+    uint16_t calculateChecksum(const String& data) {
+        uint16_t checksum = 0;
+        for (int i = 0; i < data.length(); i++) {
+            checksum += data.charAt(i);
+        }
+        return checksum;
+    }
+};
+
+// ============================================================================
+// ADVANCED GOALKEEPER MOVEMENT CONTROLLER
+// ============================================================================
+
+class GoalkeeperMovementController {
+private:
+    GoalkeeperHardwareInterface* hardware;
+    AdvancedPIDController gyroPID;
+    AdvancedPIDController positionPID;
+    AdvancedPIDController interceptPID; // New PID for aggressive interception
+    
+    // Movement optimization
+    float energyEfficiencyFactor = 1.0f;
+
+public:
+    GoalkeeperMovementController(GoalkeeperHardwareInterface* hw) 
+        : hardware(hw), gyroPID(Config::GYRO_PID), 
+          positionPID(Config::POSITION_PID),
+          interceptPID(Config::INTERCEPT_PID) {}
+    
+    void move(int direction, float speedMultiplier = 1.0f, bool pullback = false) {
+        int speed = (int)(Config::BASE_SPEED * speedMultiplier * energyEfficiencyFactor);
+        int ml1, ml2, mr1, mr2;
+        
+        calculateMotorSpeeds(direction, speed, ml1, ml2, mr1, mr2);
+        
+        // Apply PID corrections (gyro stabilization always active)
+        float gyroCorrection = gyroPID.compute(0, 0); // Assuming target heading is 0 relative to current orientation
+        ml1 += gyroCorrection; ml2 += gyroCorrection;
+        mr1 -= gyroCorrection; mr2 -= gyroCorrection; // Negative for right motors to turn
+        
+        hardware->setMotorSpeeds(ml1, ml2, mr2, mr1, pullback);
+    }
+    
+    void moveToGlobalPosition(const Vector2D& targetGlobalPos, const Vector2D& currentGlobalPos, float currentHeading, float speedFactor = 1.0f) {
+        Vector2D errorVector = targetGlobalPos - currentGlobalPos;
+        float distance = errorVector.magnitude();
+        
+        if (distance < 1.0f) { // Close enough
+            stop();
+            return;
+        }
+        
+        // Calculate target angle in global coordinates
+        float targetAngleGlobal = atan2(errorVector.y, errorVector.x) * 180.0f / PI;
+        
+        // Calculate heading error (difference between target angle and current robot heading)
+        float headingError = targetAngleGlobal - currentHeading;
+        while (headingError > 180.0f) headingError -= 360.0f;
+        while (headingError < -180.0f) headingError += 360.0f;
+
+        // Use PID for positioning
+        float positionCorrection = positionPID.compute(0, headingError);
+        
+        // Determine movement direction based on target angle and distance
+        int motorDirection = angleToMotorDirection(headingError); // Convert angle error to movement direction
+        
+        // Adjust speed based on distance and PID output
+        float dynamicSpeed = speedFactor * constrain(distance / 50.0f, 0.2f, 1.0f); // Scale speed by distance
+        dynamicSpeed += abs(positionCorrection) * 0.1f; // Add speed for rotational correction
+        dynamicSpeed = constrain(dynamicSpeed, 0.1f, 1.0f); // Ensure minimum speed
+        
+        move(motorDirection, dynamicSpeed);
+    }
+    
+    void interceptBall(const Vector2D& ballGlobalPos, const Vector2D& currentRobotPos, float speedFactor = 1.0f) {
+        Vector2D interceptVector = ballGlobalPos - currentRobotPos;
+        float distance = interceptVector.magnitude();
+        
+        if (distance < 0.5f) { // Very close to ball, stop or dribble
+            stop(); // Or initiate kick
+            return;
+        }
+
+        float targetAngle = atan2(interceptVector.y, interceptVector.x) * 180.0f / PI;
+        // Assume robot is always facing the field, so we just move towards the ball's angle
+        
+        // Use interceptPID for direct movement towards the ball
+        float correction = interceptPID.compute(0, 0); // This PID might be for speed or angle if needed
+        
+        int motorDirection = angleToMotorDirection(targetAngle);
+        move(motorDirection, speedFactor);
+    }
+
+    void stop() {
+        hardware->setMotorSpeeds(0, 0, 0, 0, false, true); // Immediate stop
+    }
+    
+    void optimizeEnergyEfficiency(const GoalkeeperSensorData& sensors) {
+        // Adjust efficiency based on battery level and temperature
+        float batteryFactor = sensors.batteryVoltage / 12.0f; // 12V is nominal
+        float temperatureFactor = 1.0f - (sensors.temperature - 20.0f) / 40.0f; // Scale 20-60C
+        
+        energyEfficiencyFactor = batteryFactor * temperatureFactor;
+        energyEfficiencyFactor = constrain(energyEfficiencyFactor, 0.5f, 1.0f); // Cap efficiency
+    }
+
+private:
+    void calculateMotorSpeeds(int direction, int speed, int& ml1, int& ml2, int& mr1, int& mr2) {
+        float speedF = (float)speed;
+        
+        switch (direction) {
+            case 0:  // Forward
+                ml1 = speedF; ml2 = speedF; mr1 = -speedF; mr2 = -speedF;
+                break;
+            case 1:  // Forward-right (45 deg)
+                ml1 = speedF; ml2 = speedF * 0.5f; mr1 = -speedF; mr2 = -speedF * 0.5f;
+                break;
+            case 2:  // Right (90 deg)
+                ml1 = speedF; ml2 = 0; mr1 = -speedF; mr2 = 0;
+                break;
+            case 3:  // Back-right (135 deg)
+                ml1 = speedF; ml2 = -speedF * 0.5f; mr1 = -speedF; mr2 = speedF * 0.5f;
+                break;
+            case 4:  // Backward (180 deg)
+                ml1 = speedF; ml2 = -speedF; mr1 = -speedF; mr2 = speedF;
+                break;
+            case 5:  // Back-left (225 deg)
+                ml1 = speedF * 0.5f; ml2 = -speedF; mr1 = -speedF * 0.5f; mr2 = speedF;
+                break;
+            case 6:  // Left (270 deg)
+                ml1 = 0; ml2 = -speedF; mr1 = 0; mr2 = speedF;
+                break;
+            case 7:  // Forward-left (315 deg)
+                ml1 = -speedF * 0.5f; ml2 = speedF; mr1 = speedF * 0.5f; mr2 = -speedF; // Note: adjusted this from prev version for proper rotation
+                break;
+            case 8:  // Rotate left (CW)
+                ml1 = -speedF; ml2 = -speedF; mr1 = speedF; mr2 = speedF;
+                break;
+            case 9:  // Rotate right (CCW)
+                ml1 = speedF; ml2 = speedF; mr1 = -speedF; mr2 = -speedF;
+                break;
+            default: // Stop
+                ml1 = ml2 = mr1 = mr2 = 0;
+                break;
+        }
+    }
+    
+    int angleToMotorDirection(float angleDeg) {
+        // Normalize angle to 0-360
+        angleDeg = fmod(angleDeg + 360.0f, 360.0f);
+        
+        // Divide by 45 degrees for 8 cardinal/intercardinal directions
+        // 0=Forward, 1=FR, 2=R, 3=BR, 4=B, 5=BL, 6=L, 7=FL
+        int dirIndex = (int)((angleDeg + 22.5f) / 45.0f) % 8;
+        return dirIndex;
+    }
+};
+
+// ============================================================================
+// ADVANCED GOALKEEPER AI WITH PREDICTIVE INTERCEPTION
+// ============================================================================
+
+class AdvancedGoalkeeperAI {
+private:
+    // Neural network for trajectory prediction (simplified)
+    float trajectoryWeights[3][8] = {{0}}; // Input layer, 2 hidden layers, output layer
+    float trajectoryBiases[3][8] = {{0}};
+    
+    // Strategy learning system (Q-learning)
+    float strategyQTable[13][8] = {{0}};  // States x Actions (13 states, 8 actions)
+    float learningRate = 0.08f;
+    float discountFactor = 0.92f;
+    float epsilon = 0.05f;  // Lower exploration for goalkeeper (more deterministic)
+
+public:
+    void initialize() {
+        initializeNeuralNetwork();
+        initializeStrategyLearning();
+    }
+    
+    void updateAI(GoalkeeperAIState& ai, const GoalkeeperSensorData& sensors, GoalkeeperRobotState& state) {
+        // Predict ball trajectory
+        predictBallTrajectory(ai, sensors, state.currentPosition);
+        
+        // Calculate optimal interception point
+        calculateOptimalInterception(ai, sensors, state);
+        
+        // Adapt defense strategy
+        adaptDefenseStrategy(ai, sensors, state);
+        
+        // Update performance metrics
+        updatePerformanceMetrics(ai, state, sensors);
+    }
+    
+    Vector2D getOptimalPosition(const GoalkeeperAIState& ai, const GoalkeeperSensorData& sensors, const GoalkeeperRobotState& state) {
+        Vector2D optimalPos = state.goalCenter; // Default to goal center
+        
+        if (ai.trajectoryConfidence > Config::INTERCEPTION_CONFIDENCE_MIN && ai.interceptionTime > 0) {
+            // Use predicted interception point if confident
+            optimalPos = ai.optimalInterceptionPoint;
+        } else if (sensors.ballThreatLevel > 0.3f) {
+            // Position based on current ball position relative to goal
+            // Convert robot-relative ball vector to global coordinates relative to goal
+            // (Assuming robot is at state.currentPosition)
+            Vector2D globalBallPos = state.currentPosition + sensors.ballVector;
+
+            // Simple "cover the goal" logic: move laterally to align with ball's X-position
+            optimalPos.x = globalBallPos.x;
+            optimalPos.y = state.optimalDistance; // Maintain optimal distance from goal line
+        }
+        
+        // Constrain to goal area's lateral limits
+        optimalPos.x = constrain(optimalPos.x, 
+                                -Config::MAX_GOAL_POSITION, 
+                                Config::MAX_GOAL_POSITION);
+        
+        // Constrain to goal depth (goalkeeper should not leave goal area too much)
+        optimalPos.y = constrain(optimalPos.y, 
+                                state.goalCenter.y - Config::GOAL_DEPTH, 
+                                state.goalCenter.y + Config::OPTIMAL_GOAL_DISTANCE * 1.5f); // Allow slight forward movement
+
+        return optimalPos;
+    }
+    
+    InterceptionType chooseInterceptionType(const GoalkeeperAIState& ai, const GoalkeeperSensorData& sensors) {
+        if (sensors.ballThreatLevel > 0.9f) {
+            return InterceptionType::BLOCKING;  // Emergency block for critical threats
+        } else if (ai.trajectoryConfidence > 0.8f && ai.interceptionTime < 0.5f) { // High confidence, short time
+            return InterceptionType::PREDICTIVE;  // Predictive interception
+        } else if (sensors.ballThreatLevel > 0.5f) {
+            return InterceptionType::DIRECT;  // Direct interception if threat is significant
+        } else {
+            return InterceptionType::DEFLECTION;  // Deflection save for non-critical or slow balls
+        }
+    }
+
+private:
+    void initializeNeuralNetwork() {
+        // Initialize trajectory prediction network weights with small random values
+        for (int i = 0; i < 3; i++) { // Layers
+            for (int j = 0; j < 8; j++) { // Neurons per layer (simplified)
+                trajectoryWeights[i][j] = (random(200) - 100) / 2000.0f; // Range -0.05 to 0.05
+                trajectoryBiases[i][j] = (random(100) - 50) / 2000.0f;    // Range -0.025 to 0.025
+            }
+        }
+    }
+    
+    void initializeStrategyLearning() {
+        // Initialize Q-learning table with small random values
+        for (int i = 0; i < 13; i++) { // States
+            for (int j = 0; j < 8; j++) { // Actions
+                strategyQTable[i][j] = (random(100) - 50) / 2000.0f;
+            }
+        }
+    }
+    
+    void predictBallTrajectory(GoalkeeperAIState& ai, const GoalkeeperSensorData& sensors, const Vector2D& robotGlobalPos) {
+        if (sensors.ballThreatLevel < 0.1f) {
+            ai.trajectoryConfidence = 0.0f;
+            return;
+        }
+        
+        // Convert robot-relative ball vector and velocity to global coordinates
+        // This is a simplification; actual transformation needs robot's global orientation
+        Vector2D globalBallPos = robotGlobalPos + sensors.ballVector;
+        Vector2D globalBallVel = sensors.ballVelocity; // Assuming sensor velocity is already global or transformable
+        
+        // Inputs for neural network: current global ball position, global velocity, and threat level
+        float inputs[5] = {
+            globalBallPos.x,
+            globalBallPos.y,
+            globalBallVel.x,
+            globalBallVel.y,
+            sensors.ballThreatLevel
+        };
+        
+        // Forward propagation (simplified 3-layer network with 8 neurons per hidden layer)
+        float hidden1[8], hidden2[8], output[2]; // Output is predicted delta_x, delta_y for next step
+        
+        // Input to first hidden layer
+        for (int i = 0; i < 8; i++) {
+            hidden1[i] = trajectoryBiases[0][i];
+            for (int j = 0; j < 5; j++) {
+                hidden1[i] += inputs[j] * trajectoryWeights[0][j]; // weights[layer][input_idx]
+            }
+            hidden1[i] = tanh(hidden1[i]); // Activation function
+        }
+        
+        // First to second hidden layer
+        for (int i = 0; i < 8; i++) {
+            hidden2[i] = trajectoryBiases[1][i];
+            for (int j = 0; j < 8; j++) {
+                hidden2[i] += hidden1[j] * trajectoryWeights[1][j];
+            }
+            hidden2[i] = tanh(hidden2[i]);
+        }
+        
+        // Second hidden to output layer
+        for (int i = 0; i < 2; i++) {
+            output[i] = trajectoryBiases[2][i];
+            for (int j = 0; j < 8; j++) {
+                output[i] += hidden2[j] * trajectoryWeights[2][j];
+            }
+        }
+        
+        // Generate trajectory predictions for future time steps
+        Vector2D currentPredictedPos = globalBallPos;
+        for (int i = 0; i < Config::INTERCEPTION_LOOKAHEAD; i++) {
+            float t_step = (i + 1) * (Config::MAIN_LOOP_INTERVAL / 1000.0f); // Time steps in seconds
+            
+            // Simple physics-based prediction + NN correction
+            Vector2D physicsPrediction = globalBallPos + globalBallVel * t_step;
+            Vector2D nnCorrection(output[0] * t_step * 2.0f, output[1] * t_step * 2.0f); // Scaling factor
+            
+            ai.ballTrajectory[i] = physicsPrediction + nnCorrection;
+        }
+        
+        // Calculate trajectory confidence based on recent consistency
+        ai.trajectoryConfidence = calculateTrajectoryConfidence(sensors);
+    }
+    
+    void calculateOptimalInterception(GoalkeeperAIState& ai, const GoalkeeperSensorData& sensors, const GoalkeeperRobotState& state) {
+        if (ai.trajectoryConfidence < Config::INTERCEPTION_CONFIDENCE_MIN || sensors.ballThreatLevel < 0.1f) {
+            ai.optimalInterceptionPoint = state.goalCenter;
+            ai.interceptionTime = 0.0f;
+            return;
+        }
+        
+        // Find optimal interception point along the predicted trajectory
+        float minTime = 1000.0f; // Large initial value
+        Vector2D bestPoint = state.goalCenter;
+        
+        for (int i = 0; i < Config::INTERCEPTION_LOOKAHEAD; i++) {
+            Vector2D trajectoryPoint = ai.ballTrajectory[i];
+            float timeToBall = (i + 1) * (Config::MAIN_LOOP_INTERVAL / 1000.0f); // Time for ball to reach this point
+            
+            // Calculate time for goalkeeper to reach this point
+            Vector2D toPoint = trajectoryPoint - state.currentPosition;
+            float distanceToPoint = toPoint.magnitude();
+            
+            // Estimate goalkeeper's travel time (distance / max_speed + reaction_time)
+            float goalkeeperTravelSpeed = Config::BASE_SPEED / 65535.0f; // Normalize speed for estimation
+            float goalkeeperTime = (distanceToPoint / goalkeeperTravelSpeed) + (ai.reactionTime / 1000.0f);
+            
+            // Check if goalkeeper can intercept before the ball reaches the goal line (Y <= 0)
+            if (trajectoryPoint.y <= 0 && goalkeeperTime < timeToBall && timeToBall < minTime) {
+                minTime = timeToBall;
+                bestPoint = trajectoryPoint;
+            }
+        }
+        
+        ai.optimalInterceptionPoint = bestPoint;
+        ai.interceptionTime = minTime;
+    }
+    
+    void adaptDefenseStrategy(GoalkeeperAIState& ai, const GoalkeeperSensorData& sensors, GoalkeeperRobotState& state) {
+        static unsigned long lastAdaptation = 0;
+        
+        if (millis() - lastAdaptation > Config::STRATEGY_UPDATE_INTERVAL * 5) { // Adapt every few seconds
+            // Analyze recent performance (save rate)
+            float saveRate = (ai.totalThreats > 0) ? 
+                           (float)ai.successfulSaves / ai.totalThreats : 0.5f;
+            
+            // Adjust strategy based on performance and current threat level
+            if (saveRate < 0.6f && sensors.ballThreatLevel > 0.5f) {
+                ai.currentStrategy = DefenseStrategy::CONSERVATIVE;
+                state.optimalDistance = Config::OPTIMAL_GOAL_DISTANCE * 0.8f;
+                ai.learningRate = 0.1f; // Increase learning if performance is poor
+            } else if (saveRate > 0.8f && sensors.ballThreatLevel < 0.3f) {
+                ai.currentStrategy = DefenseStrategy::AGGRESSIVE;
+                state.optimalDistance = Config::OPTIMAL_GOAL_DISTANCE * 1.2f;
+                ai.learningRate = 0.05f; // Reduce learning if performance is good
+            } else {
+                ai.currentStrategy = DefenseStrategy::BALANCED;
+                state.optimalDistance = Config::OPTIMAL_GOAL_DISTANCE;
+                ai.learningRate = 0.08f;
+            }
+            
+            lastAdaptation = millis();
+        }
+    }
+    
+    void updatePerformanceMetrics(GoalkeeperAIState& ai, const GoalkeeperRobotState& state, const GoalkeeperSensorData& sensors) {
+        static unsigned long lastUpdate = 0;
+        
+        if (millis() - lastUpdate > 5000) { // Update every 5 seconds
+            // Calculate save percentage
+            ai.savePercentage = (ai.totalThreats > 0) ? 
+                              (float)ai.successfulSaves / ai.totalThreats * 100.0f : 0.0f;
+            
+            // Calculate positioning accuracy (simplified: distance to target)
+            Vector2D positionError = state.currentPosition - state.targetPosition;
+            ai.positioningAccuracy = 100.0f * (1.0f - constrain(positionError.magnitude() / 50.0f, 0.0f, 1.0f));
+            
+            // Update energy efficiency
+            ai.energyEfficiency = sensors.batteryVoltage / 12.0f; // Assuming 12V nominal
+            
+            // Adapt reaction time based on recent performance
+            if (ai.savePercentage > 85.0f) {
+                ai.reactionTime = max(ai.reactionTime * 0.98f, 100.0f); // Improve reaction time
+            } else if (ai.savePercentage < 65.0f) {
+                ai.reactionTime = min(ai.reactionTime * 1.02f, 250.0f); // Slower reaction time
+            }
+            
+            lastUpdate = millis();
+        }
+    }
+    
+    float calculateTrajectoryConfidence(const GoalkeeperSensorData& sensors) {
+        // Calculate confidence based on multiple factors:
+        // 1. Ball threat level (stronger signal, higher confidence)
+        // 2. Velocity consistency (stable velocity means more predictable)
+        // 3. Sensor data stability (less noisy data, higher confidence)
+        
+        float confidence = 0.0f;
+        
+        // Factor 1: Ball threat level (0.0 - 1.0)
+        confidence += sensors.ballThreatLevel * 0.4f;
+        
+        // Factor 2: Velocity consistency (compare current velocity to a recent average)
+        static Vector2D lastVelocity = Vector2D(0,0);
+        float velocityChangeMagnitude = (sensors.ballVelocity - lastVelocity).magnitude();
+        float velocityConsistency = 1.0f / (1.0f + velocityChangeMagnitude * 5.0f); // Scale factor
+        confidence += velocityConsistency * 0.3f;
+        lastVelocity = sensors.ballVelocity;
+
+        // Factor 3: Sensor stability (fluctuations in tsopMin or ballThreatLevel)
+        static float lastThreatLevel = 0.0f;
+        float threatStability = 1.0f - abs(sensors.ballThreatLevel - lastThreatLevel);
+        confidence += threatStability * 0.3f;
+        lastThreatLevel = sensors.ballThreatLevel;
+
+        return constrain(confidence, 0.0f, 1.0f);
+    }
+    
+    int mapStateToIndex(GoalkeeperStateEnum state) {
+        switch (state) {
+            case GoalkeeperStateEnum::DEFENDING: return 0;
+            case GoalkeeperStateEnum::TRACKING_BALL: return 1;
+            case GoalkeeperStateEnum::POSITIONING: return 2;
+            case GoalkeeperStateEnum::INTERCEPTING: return 3;
+            case GoalkeeperStateEnum::SHOOTING: return 4;
+            case GoalkeeperStateEnum::RETURNING_TO_GOAL: return 5;
+            case GoalkeeperStateEnum::COORDINATING_DEFENSE: return 6;
+            case GoalkeeperStateEnum::LEARNING_MODE: return 7;
+            case GoalkeeperStateEnum::EMERGENCY_STOP: return 8;
+            default: return 9; // Fallback for unknown states
+        }
+    }
+    
+    void updateQLearning(GoalkeeperRobotState& state, int action, float reward) {
+        if (!state.adaptiveMode) return;
+        
+        int currentStateIdx = mapStateToIndex(state.currentState);
+        // Simplified: next state is just current state after action, or actual next state
+        int nextStateIdx = mapStateToIndex(state.currentState); 
+        
+        // Find max Q-value for the next state
+        float maxNextQ = strategyQTable[nextStateIdx][0];
+        for (int i = 1; i < 8; i++) { // Assuming 8 possible actions for strategy learning
+            if (strategyQTable[nextStateIdx][i] > maxNextQ) {
+                maxNextQ = strategyQTable[nextStateIdx][i];
+            }
+        }
+        
+        // Q-learning update formula:
+        // Q(s,a) = Q(s,a) + alpha * [reward + gamma * max_a' Q(s',a') - Q(s,a)]
+        float oldQ = strategyQTable[currentStateIdx][action];
+        float newQ = oldQ + learningRate * (reward + discountFactor * maxNextQ - oldQ);
+        strategyQTable[currentStateIdx][action] = newQ;
+    }
+
+    float calculateReward(const GoalkeeperRobotState& state, const GoalkeeperSensorData& sensors, const GoalkeeperAIState& ai) {
+        float reward = 0.0f;
+        
+        // Positive rewards
+        if (sensors.ballThreatLevel > 0.8f && state.currentState == GoalkeeperStateEnum::INTERCEPTING) reward += 50.0f; // Successfully intercepting critical ball
+        if (state.currentState == GoalkeeperStateEnum::DEFENDING && sensors.ballThreatLevel < 0.1f) reward += 10.0f; // Maintaining good defense with no ball
+        if (sensors.onGoalLine && abs(state.goalCenterOffset) < 5) reward += 20.0f; // Centered on goal line
+        if (ai.savePercentage > 0.8f) reward += 30.0f; // Good save performance
+        
+        // Negative rewards
+        if (sensors.onOutline) reward -= 100.0f; // Robot went out of bounds (big penalty)
+        if (!sensors.onGoalLine && state.currentState == GoalkeeperStateEnum::DEFENDING) reward -= 15.0f; // Not on goal line while defending
+        if (state.ballLostCounter > 20) reward -= 20.0f; // Ball lost for too long
+        if (state.emergencyStop) reward -= 200.0f; // Emergency stop triggered
+        
+        // Energy efficiency (minor reward/penalty)
+        reward += (sensors.batteryVoltage / 12.0f - 1.0f) * 5.0f; // Reward for high battery, penalty for low
+        
+        return reward;
+    }
+};
+
+// ============================================================================
+// ADVANCED GOALKEEPER COMMUNICATION SYSTEM
+// ============================================================================
+
+class GoalkeeperCommunicationSystem {
+private:
+    GoalkeeperHardwareInterface* hardware;
+    
+    // Communication protocol structure
+    struct Packet {
+        uint8_t header = 0xAA; // Start byte
+        uint8_t type;          // Packet type (e.g., 0x01 for status, 0x02 for ball data)
+        uint8_t length;        // Length of data payload
+        uint8_t data[Config::PACKET_SIZE]; // Max data size
+        uint16_t checksum;     // CRC16 checksum
+        uint8_t footer = 0x55; // End byte
+    };
+    
+    // Attacker data received
+    struct AttackerData {
+        int ballPosition = -1; // TSOP sensor number from attacker
+        float ballStrength = 0.0f; // Ball strength from attacker
+        GoalkeeperStateEnum attackerState = GoalkeeperStateEnum::INITIALIZING; // Attacker's state
+        float attackerHeading = 0.0f; // Attacker's heading
+        float predictionConfidence = 0.0f; // Attacker's ball prediction confidence
+        float batteryVoltage = 0.0f; // Attacker's battery
+        bool ballDetected = false;
+        bool communicationActive = false;
+        unsigned long lastCommTime = 0;
+        float signalStrength = 0.0f;
+        int packetLossRate = 0;
+    } attackerData;
+    
+    // Communication statistics
+    int packetsSent = 0;
+    int packetsReceived = 0;
+    int packetsLost = 0;
+    unsigned long totalCommTime = 0;
+
+public:
+    GoalkeeperCommunicationSystem(GoalkeeperHardwareInterface* hw) : hardware(hw) {}
+    
+    void update(const GoalkeeperSensorData& sensors, const GoalkeeperRobotState& state, const GoalkeeperAIState& aiState) {
+        // Process incoming data from attacker
+        processIncomingData();
+        
+        // Send goalkeeper status to attacker
+        sendGoalkeeperStatus(sensors, state, aiState);
+        
+        // Update communication statistics
+        updateCommStats();
+        
+        // Check communication health
+        checkCommHealth();
+    }
+    
+    const AttackerData& getAttackerData() const {
+        return attackerData;
+    }
+    
+    void sendEmergencyStop() {
+        // Send an emergency stop command to the attacker
+        String emergencyMsg = "EMERGENCY:STOP";
+        hardware->sendBluetoothData(emergencyMsg);
+        packetsSent++;
+    }
+    
+    void requestAttackerStatus() {
+        // Request status update from attacker (e.g., when comms lost)
+        String requestMsg = "REQ:STATUS";
+        hardware->sendBluetoothData(requestMsg);
+        packetsSent++;
+    }
+
+private:
+    void processIncomingData() {
+        String rawData = hardware->receiveBluetoothData();
+        if (rawData.length() == 0) return;
+        
+        // Expected format: TYPE:DATA|CRC:XXXX
+        int typeEnd = rawData.indexOf(':');
+        int crcStart = rawData.indexOf("|CRC:");
+        
+        if (typeEnd == -1 || crcStart == -1 || crcStart + 5 >= rawData.length()) return; // Invalid format
+        
+        String typeStr = rawData.substring(0, typeEnd);
+        String dataStr = rawData.substring(typeEnd + 1, crcStart);
+        String crcStr = rawData.substring(crcStart + 5);
+        
+        // Verify checksum
+        uint16_t receivedCRC = (uint16_t)strtol(crcStr.c_str(), NULL, 16);
+        uint16_t calculatedCRC = calculateCRC(typeStr + ":" + dataStr);
+        
+        if (receivedCRC != calculatedCRC) {
+            packetsLost++;
+            Serial.println("CRC Mismatch!");
+            return; // Corrupted packet
+        }
+        
+        packetsReceived++;
+        attackerData.lastCommTime = millis();
+        attackerData.communicationActive = true;
+        
+        // Process different packet types
+        if (typeStr == "F1S_STATUS") {
+            parseAttackerStatus(dataStr);
+        } else if (typeStr == "F1S_BALL") {
+            parseAttackerBallData(dataStr);
+        } else if (typeStr == "EMERGENCY") {
+            // Handle emergency messages from attacker
+            if (dataStr == "STOP") {
+                // Trigger global emergency stop or warning
+                Serial.println("Attacker sent EMERGENCY STOP!");
+            }
+        }
+    }
+    
+    void sendGoalkeeperStatus(const GoalkeeperSensorData& sensors, const GoalkeeperRobotState& state, const GoalkeeperAIState& aiState) {
+        static unsigned long lastSend = 0;
+        if (millis() - lastSend < Config::COMM_UPDATE_INTERVAL) return;
+        
+        // Create comprehensive status packet for attacker
+        String statusData = "POS_X:" + String(state.currentPosition.x, 1) + 
+                           ",POS_Y:" + String(state.currentPosition.y, 1) +
+                           ",STATE:" + String((int)state.currentState) +
+                           ",BALL_THREAT:" + String(sensors.ballThreatLevel, 2) +
+                           ",SAVE_PCT:" + String(aiState.savePercentage, 1) +
+                           ",BAT:" + String(sensors.batteryVoltage, 1) +
+                           ",TEMP:" + String(sensors.temperature, 1);
+        
+        hardware->sendBluetoothData("GK_STATUS:" + statusData);
+        packetsSent++;
+        lastSend = millis();
+    }
+    
+    void parseAttackerStatus(const String& data) {
+        // Example: BALL:X,STR:Y,STATE:Z,HEAD:A,CONF:B,BAT:C,TEMP:D
+        
+        // Parse ball position (TSOP num)
+        int ballPosStart = data.indexOf("BALL:") + 5;
+        int ballPosEnd = data.indexOf(',', ballPosStart);
+        attackerData.ballPosition = data.substring(ballPosStart, ballPosEnd).toInt();
+        
+        // Parse ball strength
+        int strStart = data.indexOf("STR:") + 4;
+        int strEnd = data.indexOf(',', strStart);
+        attackerData.ballStrength = data.substring(strStart, strEnd).toFloat();
+        attackerData.ballDetected = (attackerData.ballStrength > 0.1f); // Consider ball detected if strength > 0.1
+        
+        // Parse attacker state
+        int stateStart = data.indexOf("STATE:") + 6;
+        int stateEnd = data.indexOf(',', stateStart);
+        attackerData.attackerState = (GoalkeeperStateEnum)data.substring(stateStart, stateEnd).toInt();
+        
+        // Parse attacker heading
+        int headStart = data.indexOf("HEAD:") + 5;
+        int headEnd = data.indexOf(',', headStart);
+        attackerData.attackerHeading = data.substring(headStart, headEnd).toFloat();
+        
+        // Parse prediction confidence
+        int confStart = data.indexOf("CONF:") + 5;
+        int confEnd = data.indexOf(',', confStart);
+        attackerData.predictionConfidence = data.substring(confStart, confEnd).toFloat();
+        
+        // Parse battery voltage
+        int batStart = data.indexOf("BAT:") + 4;
+        int batEnd = data.indexOf(',', batStart);
+        attackerData.batteryVoltage = data.substring(batStart, batEnd).toFloat();
+
+        // Temperature is not critical for inter-robot communication often, but can be parsed.
+        // int tempStart = data.indexOf("TEMP:") + 5;
+        // attackerData.temperature = data.substring(tempStart).toFloat();
+    }
+    
+    void parseAttackerBallData(const String& data) {
+        // This packet type might be used if only ball data is sent
+        // Similar parsing logic as above for ball position and strength
+    }
+    
+    uint16_t calculateCRC(const String& data) {
+        uint16_t crc = 0xFFFF;
+        for (int i = 0; i < data.length(); i++) {
+            crc ^= data.charAt(i);
+            for (int j = 0; j < 8; j++) {
+                if (crc & 1) {
+                    crc = (crc >> 1) ^ 0xA001; // CRC-16-CCITT polynomial
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        return crc;
+    }
+    
+    void updateCommStats() {
+        static unsigned long lastUpdate = 0;
+        if (millis() - lastUpdate > 5000) { // Update every 5 seconds
+            if (packetsSent > 0) {
+                attackerData.packetLossRate = (packetsLost * 100) / packetsSent;
+            }
+            
+            // Calculate signal strength (simplified based on packet loss)
+            attackerData.signalStrength = 1.0f - (attackerData.packetLossRate / 100.0f);
+            attackerData.signalStrength = constrain(attackerData.signalStrength, 0.0f, 1.0f);
+            
+            // Reset counters for next interval
+            packetsSent = 0;
+            packetsReceived = 0;
+            packetsLost = 0;
+            lastUpdate = millis();
+        }
+    }
+    
+    void checkCommHealth() {
+        // Check if communication is healthy (recently received data)
+        if (millis() - attackerData.lastCommTime > Config::COMM_TIMEOUT) {
+            attackerData.communicationActive = false;
+            attackerData.signalStrength = 0.0f;
+        }
+        
+        // Auto-recovery attempts (ping attacker if comms lost)
+        if (!attackerData.communicationActive) {
+            static unsigned long lastRecoveryAttempt = 0;
+            if (millis() - lastRecoveryAttempt > 2000) { // Try every 2 seconds
+                requestAttackerStatus(); // Send a request
+                lastRecoveryAttempt = millis();
+            }
+        }
+    }
+};
+
+// ============================================================================
+// TASK SCHEDULER FOR REAL-TIME PERFORMANCE (Shared utility)
+// ============================================================================
+
+class TaskScheduler {
+private:
+    struct Task {
+        void (*function)();
+        unsigned long interval;
+        unsigned long lastRun;
+        int priority;
+        bool enabled;
+        unsigned long lastExecutionDuration; // For CPU usage calculation
+    };
+    
+    Task tasks[10]; // Max 10 tasks
+    int taskCount = 0;
+    unsigned long totalCPUTime = 0; // Total microseconds spent in tasks
+    unsigned long lastCPUMeasurement = 0;
+    unsigned long measurementPeriod = 1000000; // 1 second in microseconds
+
+public:
+    TaskScheduler() {
+        lastCPUMeasurement = micros();
+    }
+
+    void addTask(void (*func)(), unsigned long interval, int priority = 1, bool enabled = true) {
+        if (taskCount < 10) {
+            tasks[taskCount] = {func, interval, 0, priority, enabled, 0};
+            taskCount++;
+        } else {
+            Serial.println("Task limit reached!");
+        }
+    }
+    
+    void run() {
+        unsigned long currentTime = millis();
+        
+        // Sort tasks by priority (higher value = higher priority)
+        // Simple bubble sort, OK for small number of tasks
+        for (int i = 0; i < taskCount - 1; i++) {
+            for (int j = 0; j < taskCount - i - 1; j++) {
+                if (tasks[j].priority < tasks[j + 1].priority) {
+                    Task temp = tasks[j];
+                    tasks[j] = tasks[j + 1];
+                    tasks[j + 1] = temp;
+                }
+            }
+        }
+        
+        // Execute due tasks
+        for (int i = 0; i < taskCount; i++) {
+            if (tasks[i].enabled && (currentTime - tasks[i].lastRun >= tasks[i].interval)) {
+                unsigned long taskStart = micros();
+                tasks[i].function();
+                unsigned long taskEnd = micros();
+                
+                tasks[i].lastExecutionDuration = taskEnd - taskStart;
+                tasks[i].lastRun = currentTime;
+                totalCPUTime += tasks[i].lastExecutionDuration;
+            }
+        }
+        
+        // Update CPU usage statistics periodically
+        updateCPUStats();
+    }
+    
+    void enableTask(int index, bool enable) {
+        if (index < taskCount) {
+            tasks[index].enabled = enable;
+        }
+    }
+    
+    int getCPUUsage() {
+        unsigned long elapsedTime = micros() - lastCPUMeasurement;
+        if (elapsedTime == 0) return 0; // Avoid division by zero
+        return (int)((totalCPUTime * 100.0f) / elapsedTime);
+    }
+
+private:
+    void updateCPUStats() {
+        unsigned long now = micros();
+        if (now - lastCPUMeasurement >= measurementPeriod) {
+            totalCPUTime = 0; // Reset for next measurement period
+            lastCPUMeasurement = now;
+        }
+    }
+};
+
+// ============================================================================
+// MAIN ROBOT APPLICATION CLASS
+// ============================================================================
+
+class F2SAdvancedGoalkeeper {
+private:
+    // Core systems
+    GoalkeeperHardwareInterface hardware;
+    GoalkeeperSensorSystem sensorSystem;
+    GoalkeeperMovementController movement;
+    AdvancedGoalkeeperAI aiSystem;
+    GoalkeeperCommunicationSystem communication;
+    TaskScheduler scheduler;
+    
+    // Robot state
+    GoalkeeperRobotState robotState;
+    GoalkeeperAIState aiState;
+    GoalkeeperSensorData currentSensors; // Latest sensor data
+    
+    // Performance monitoring
+    unsigned long loopStartTime = 0;
+    unsigned long frameCount = 0;
+    float averageLoopTime = 0.0f;
+
+public:
+    F2SAdvancedGoalkeeper() : movement(&hardware), aiSystem(), communication(&hardware) {
+        hardware.setSensorSystem(&sensorSystem); // Link hardware to sensor system
+    }
+    
+    bool initialize() {
+        Serial.begin(Config::BLUETOOTH_BAUD);
+        Serial.println("F2S Advanced Goalkeeper v3.0 Initializing...");
+        
+        if (!hardware.initialize()) {
+            Serial.println("Hardware initialization failed!");
+            return false;
+        }
+
+        if (!sensorSystem.initialize()) {
+            Serial.println("Sensor system initialization failed!");
+            return false;
+        }
+        
+        // Perform sensor calibration if not done or forced
+        // if (!sensorSystem.calibrationComplete) {
+            sensorSystem.calibrateSensors();
+        // }
+        
+        // Setup task scheduler
+        setupTasks();
+        
+        // Initialize AI system
+        aiSystem.initialize();
+        aiState.adaptiveMode = true; // Enable adaptive learning
+        aiState.learningRate = Config::GYRO_PID.ki; // Example: use a config value
+        
+        // Initialize robot state (goalkeeper-specific defaults)
+        robotState.goalCenter = Vector2D(0,0); // Assume goal center is (0,0) in global coords
+        robotState.currentPosition = Vector2D(0, Config::OPTIMAL_GOAL_DISTANCE); // Start at optimal distance on goal line
+        robotState.currentState = GoalkeeperStateEnum::DEFENDING;
+        robotState.loopFrequency = 1000.0f / Config::MAIN_LOOP_INTERVAL;
+
+        Serial.println("F2S Advanced Goalkeeper v3.0 Ready!");
+        return true;
+    }
+    
+    void run() {
+        loopStartTime = micros();
+        
+        // Run scheduled tasks
+        scheduler.run();
+        
+        // Main control loop - determines overall behavior
+        mainControlLoop();
+        
+        // Update global performance metrics for display/logging
+        updatePerformanceMetrics();
+        
+        // Watchdog reset
+        resetWatchdog();
+    }
+    
+    void emergencyStop() {
+        robotState.emergencyStop = true;
+        robotState.currentState = GoalkeeperStateEnum::EMERGENCY_STOP;
+        movement.stop();
+        hardware.setShooterSpeed(0);
+        communication.sendEmergencyStop();
+        Serial.println("F2S EMERGENCY STOP ACTIVATED!");
+    }
+
+private:
+    void setupTasks() {
+        // High priority tasks (sensors, motor control, safety)
+        scheduler.addTask([this]() { this->readSensorsTask(); }, Config::SENSOR_UPDATE_INTERVAL, 10);
+        scheduler.addTask([this]() { this->updateMotorControlTask(); }, 5, 9); // Motor update at 200Hz
+        scheduler.addTask([this]() { this->safetyCheckTask(); }, 100, 8); // Safety check at 10Hz
+        
+        // Medium priority tasks (AI, communication, display)
+        scheduler.addTask([this]() { this->updateAITask(); }, Config::AI_UPDATE_INTERVAL, 5);
+        scheduler.addTask([this]() { this->updateCommunicationTask(); }, Config::COMM_UPDATE_INTERVAL, 4);
+        scheduler.addTask([this]() { this->updateDisplayTask(); }, 200, 3); // Display at 5Hz
+        
+        // Low priority tasks (maintenance, logging)
+        scheduler.addTask([this]() { this->performMaintenanceTask(); }, 10000, 1); // Every 10 seconds
+        scheduler.addTask([this]() { this->logPerformanceTask(); }, 5000, 1); // Every 5 seconds
+    }
+    
+    void mainControlLoop() {
+        // The core state machine and strategy execution
+        switch (robotState.currentState) {
+            case GoalkeeperStateEnum::INITIALIZING:
+                robotState.currentState = GoalkeeperStateEnum::CALIBRATING; // Transition to calibration
+                // Fallthrough to CALIBRATING in setup if needed, or handle here.
+                break;
+            case GoalkeeperStateEnum::CALIBRATING:
+                // Calibration is handled in initialize, so we move to defending
+                robotState.currentState = GoalkeeperStateEnum::DEFENDING;
+                break;
+            case GoalkeeperStateEnum::EMERGENCY_STOP:
+                movement.stop();
+                hardware.setShooterSpeed(0);
+                return; // Do nothing else in emergency
+                
+            case GoalkeeperStateEnum::DEFENDING:
+                executeDefendingStrategy();
+                break;
+                
+            case GoalkeeperStateEnum::TRACKING_BALL:
+                executeTrackingBallStrategy();
+                break;
+                
+            case GoalkeeperStateEnum::POSITIONING:
+                executePositioningStrategy();
+                break;
+                
+            case GoalkeeperStateEnum::INTERCEPTING:
+                executeInterceptingStrategy();
+                break;
+                
+            case GoalkeeperStateEnum::SHOOTING:
+                executeShootingStrategy();
+                break;
+                
+            case GoalkeeperStateEnum::RETURNING_TO_GOAL:
+                executeReturningStrategy();
+                break;
+            
+            case GoalkeeperStateEnum::COORDINATING_DEFENSE:
+                executeCoordinationStrategy();
+                break;
+
+            case GoalkeeperStateEnum::LEARNING_MODE:
+                // AI system handles learning, main loop mostly monitors
+                break;
+            
+            case GoalkeeperStateEnum::MAINTENANCE_MODE:
+                // Manual or automatic maintenance tasks
+                movement.stop();
+                hardware.setShooterSpeed(0);
+                break;
+
+            case GoalkeeperStateEnum::ERROR_STATE:
+                movement.stop();
+                hardware.setShooterSpeed(0);
+                break;
+
+            default:
+                movement.stop(); // Unknown state, stop
+                break;
+        }
+        
+        // Update movement optimization based on current sensor data
+        movement.optimizeEnergyEfficiency(currentSensors);
+    }
+    
+    // --- Task Functions (called by scheduler) ---
+    void readSensorsTask() {
+        currentSensors = hardware.readSensors();
+        robotState.currentPosition = currentSensors.position; // Update robot's global position
+        
+        // Update ball history for AI
+        if (currentSensors.ballThreatLevel > 0.1f) {
+            // Convert relative ball position to global for history
+            Vector2D globalBallPos = robotState.currentPosition + currentSensors.ballVector;
+            robotState.ballHistory[robotState.ballHistoryIndex] = globalBallPos;
+            robotState.ballHistoryIndex = (robotState.ballHistoryIndex + 1) % 10;
+            robotState.lastBallTime = millis();
+            robotState.ballLostCounter = 0;
+        } else {
+            robotState.ballLostCounter++;
+        }
+    }
+    
+    void updateMotorControlTask() {
+        hardware.updateMotorControl();
+    }
+    
+    void safetyCheckTask() {
+        hardware.performSafetyCheck(currentSensors);
+        
+        // Additional safety checks for goalkeeper
+        if (currentSensors.batteryVoltage < Config::MIN_BATTERY_VOLTAGE && !robotState.emergencyStop) {
+            robotState.errorCode = 101; // Low battery
+            emergencyStop();
+        }
+        
+        // Watchdog check (ensures loop is running)
+        if (millis() - robotState.lastWatchdogReset > Config::WATCHDOG_TIMEOUT && !robotState.emergencyStop) {
+            robotState.errorCode = 102; // Watchdog timeout
+            emergencyStop();
+        }
+
+        // If on outline, prioritize avoiding it
+        if (currentSensors.onOutline && robotState.currentState != GoalkeeperStateEnum::EMERGENCY_STOP) {
+            robotState.previousState = robotState.currentState;
+            robotState.currentState = GoalkeeperStateEnum::RETURNING_TO_GOAL; // Use return strategy to avoid outline
+        }
+    }
+    
+    void updateAITask() {
+        aiSystem.updateAI(aiState, currentSensors, robotState);
+        // Also update Q-learning if in adaptive mode
+        if (aiState.adaptiveMode) {
+            float reward = aiSystem.calculateReward(robotState, currentSensors, aiState);
+            // This assumes a continuous state-action process. A discrete Q-learning
+            // update requires knowing the previous state and action explicitly.
+            // For this continuous setting, the reward will influence future behavior.
+        }
+    }
+    
+    void updateCommunicationTask() {
+        communication.update(currentSensors, robotState, aiState);
+        // Check if attacker sends emergency stop
+        if (communication.getAttackerData().attackerState == GoalkeeperStateEnum::EMERGENCY_STOP && !robotState.emergencyStop) {
+             Serial.println("Attacker requested emergency stop!");
+             emergencyStop();
+        }
+    }
+    
+    void updateDisplayTask() {
+        hardware.updateAdvancedDisplay(currentSensors, robotState, aiState);
+    }
+    
+    void performMaintenanceTask() {
+        // Periodic maintenance tasks (e.g., check sensor calibration drift, memory cleanup)
+        static int maintenanceCycle = 0;
+        maintenanceCycle++;
+        
+        if (maintenanceCycle % 5 == 0) { // Every 5 cycles of this task (50 seconds)
+            // Example: check if a sensor needs recalibration based on historical data consistency
+            // if (!sensorSystem.isCalibrationAccurate()) {
+            //     robotState.maintenanceRequired = true;
+            //     // Potentially trigger a recalibration sequence
+            // }
+        }
+    }
+    
+    void logPerformanceTask() {
+        // Log performance data to Serial for debugging/analysis
+        Serial.print("Goalkeeper Perf: Loop=");
+        Serial.print(averageLoopTime, 2);
+        Serial.print("ms, CPU=");
+        Serial.print(scheduler.getCPUUsage());
+        Serial.print("%, Bat=");
+        Serial.print(currentSensors.batteryVoltage, 1);
+        Serial.print("V, Temp=");
+        Serial.print(currentSensors.temperature, 1);
+        Serial.print("C, Saves=");
+        Serial.print(aiState.savePercentage, 1);
+        Serial.println("%");
+    }
+    
+    // --- State-specific Strategy Execution ---
+
+    void executeDefendingStrategy() {
+        // Stay at optimal distance from goal line and cover goal based on threat
+        Vector2D optimalPos = aiSystem.getOptimalPosition(aiState, currentSensors, robotState);
+        robotState.targetPosition = optimalPos;
+        
+        movement.moveToGlobalPosition(robotState.targetPosition, robotState.currentPosition, currentSensors.heading, 0.7f);
+        
+        // Transition conditions
+        if (currentSensors.ballThreatLevel > 0.4f) { // Significant threat detected
+            robotState.previousState = GoalkeeperStateEnum::DEFENDING;
+            robotState.currentState = GoalkeeperStateEnum::TRACKING_BALL;
+        }
+    }
+    
+    void executeTrackingBallStrategy() {
+        // Move to track the ball's position actively
+        Vector2D ballGlobalPos = robotState.currentPosition + currentSensors.ballVector; // Convert relative to global
+        Vector2D targetTrackingPos = aiSystem.getOptimalPosition(aiState, currentSensors, robotState); // Or just ballGlobalPos
+        
+        movement.moveToGlobalPosition(targetTrackingPos, robotState.currentPosition, currentSensors.heading, 0.9f);
+        
+        // Transition conditions
+        if (currentSensors.ballThreatLevel > 0.7f && aiState.interceptionTime < Config::REACTION_TIME_MS / 1000.0f + 0.1f) { // Close and fast
+            robotState.previousState = GoalkeeperStateEnum::TRACKING_BALL;
+            robotState.currentState = GoalkeeperStateEnum::INTERCEPTING;
+        } else if (currentSensors.ballThreatLevel < 0.2f && robotState.ballLostCounter > 5) { // Ball lost or moved away
+            robotState.previousState = GoalkeeperStateEnum::TRACKING_BALL;
+            robotState.currentState = GoalkeeperStateEnum::DEFENDING;
+        }
+    }
+    
+    void executePositioningStrategy() {
+        // Re-position self to optimal defensive spot or prepare for shot
+        Vector2D optimalPos = aiSystem.getOptimalPosition(aiState, currentSensors, robotState);
+        robotState.targetPosition = optimalPos;
+        
+        movement.moveToGlobalPosition(robotState.targetPosition, robotState.currentPosition, currentSensors.heading, 0.8f);
+
+        // Transition conditions
+        if (currentSensors.ballThreatLevel > 0.5f) {
+            robotState.previousState = GoalkeeperStateEnum::POSITIONING;
+            robotState.currentState = GoalkeeperStateEnum::INTERCEPTING;
+        } else if (abs((robotState.currentPosition - robotState.targetPosition).magnitude()) < 5.0f) {
+            // Reached target position, go back to defending
+            robotState.previousState = GoalkeeperStateEnum::POSITIONING;
+            robotState.currentState = GoalkeeperStateEnum::DEFENDING;
+        }
+    }
+    
+    void executeInterceptingStrategy() {
+        // Aggressively move to intercept the ball
+        Vector2D ballGlobalPos = robotState.currentPosition + currentSensors.ballVector; // Convert relative to global
+        movement.interceptBall(ballGlobalPos, robotState.currentPosition, 1.0f); // High speed
+        
+        // Track save attempts
+        static unsigned long lastThreatDetectTime = 0;
+        if (currentSensors.ballThreatLevel > 0.8f && millis() - lastThreatDetectTime > 500) { // Only count new threats
+            robotState.saveAttempts++;
+            lastThreatDetectTime = millis();
+        }
+
+        // Transition conditions
+        if (currentSensors.ballThreatLevel > 0.95f) { // Ball is very close, try to shoot/clear
+            robotState.previousState = GoalkeeperStateEnum::INTERCEPTING;
+            robotState.currentState = GoalkeeperStateEnum::SHOOTING;
+        } else if (currentSensors.ballThreatLevel < 0.4f && robotState.ballLostCounter > 3) {
+            // Ball moved away or lost
+            robotState.previousState = GoalkeeperStateEnum::INTERCEPTING;
+            robotState.currentState = GoalkeeperStateEnum::DEFENDING;
+        }
+    }
+    
+    void executeShootingStrategy() {
+        // Clear the ball with the shooter
+        static unsigned long shootStartTime = 0;
+        
+        if (shootStartTime == 0) {
+            shootStartTime = millis();
+            hardware.setShooterSpeed(Config::MAX_MOTOR_SPEED, 10000.0f); // Max RPM
+            movement.move(0, 1.0f, true); // Move forward slightly during shot
+            robotState.successfulSaves++; // Assume a save if shooting
+        }
+        
+        if (millis() - shootStartTime >= Config::SHOOT_DURATION) {
+            hardware.setShooterSpeed(0);
+            robotState.lastShootTime = millis();
+            shootStartTime = 0;
+            robotState.previousState = GoalkeeperStateEnum::SHOOTING;
+            robotState.currentState = GoalkeeperStateEnum::RETURNING_TO_GOAL; // After shooting, return to goal
+        }
+    }
+    
+    void executeReturningStrategy() {
+        // Return to optimal defensive position, especially if on outline
+        Vector2D returnTarget = Vector2D(0, Config::OPTIMAL_GOAL_DISTANCE); // Goal center, optimal distance
+        
+        // If on outline, prioritize moving off it
+        if (currentSensors.onOutline) {
+            // Determine a safe direction to move based on which color sensor is triggered
+            // For simplicity, always move backwards if on outline
+            movement.move(4, 0.8f); // Move backward
+        } else if (!currentSensors.onGoalLine || abs(robotState.currentPosition - returnTarget.x) > 5.0f) {
+            // Not on goal line or not centered, move towards target
+            movement.moveToGlobalPosition(returnTarget, robotState.currentPosition, currentSensors.heading, 0.6f);
+        } else {
+            // Reached goal line and centered
+            movement.stop();
+            robotState.previousState = GoalkeeperStateEnum::RETURNING_TO_GOAL;
+            robotState.currentState = GoalkeeperStateEnum::DEFENDING;
+            robotState.goalCenterOffset = 0; // Reset offset when centered
+        }
+    }
+
+    void executeCoordinationStrategy() {
+        // Coordinate with attacker, e.g., covering parts of goal based on attacker's position
+        // Example: If attacker has ball, goalkeeper shifts to cover open side
+        
+        // Get attacker's data
+        GoalkeeperCommunicationSystem::AttackerData attackerInfo = communication.getAttackerData();
+        if (attackerInfo.communicationActive && attackerInfo.ballDetected) {
+            // Simple coordination: if attacker has ball on one side, shift to cover opposite
+            if (attackerInfo.ballPosition >= 0 && attackerInfo.ballPosition <= 7) { // Attacker has ball on right (from their perspective)
+                // Goalkeeper shifts left to cover the open side of the goal
+                robotState.targetPosition.x = -Config::MAX_GOAL_POSITION * 0.5f; // Shift left
+                robotState.targetPosition.y = Config::OPTIMAL_GOAL_DISTANCE;
+                movement.moveToGlobalPosition(robotState.targetPosition, robotState.currentPosition, currentSensors.heading, 0.5f);
+            } else if (attackerInfo.ballPosition >= 8 && attackerInfo.ballPosition <= 15) { // Attacker has ball on left
+                // Goalkeeper shifts right
+                robotState.targetPosition.x = Config::MAX_GOAL_POSITION * 0.5f; // Shift right
+                robotState.targetPosition.y = Config::OPTIMAL_GOAL_DISTANCE;
+                movement.moveToGlobalPosition(robotState.targetPosition, robotState.currentPosition, currentSensors.heading, 0.5f);
+            } else {
+                // Attacker has ball centered, goalkeeper remains centered
+                robotState.targetPosition.x = 0;
+                robotState.targetPosition.y = Config::OPTIMAL_GOAL_DISTANCE;
+                movement.moveToGlobalPosition(robotState.targetPosition, robotState.currentPosition, currentSensors.heading, 0.5f);
+            }
+        } else {
+            // No communication or attacker doesn't have ball, return to normal defense
+            robotState.previousState = GoalkeeperStateEnum::COORDINATING_DEFENSE;
+            robotState.currentState = GoalkeeperStateEnum::DEFENDING;
+        }
+
+        // Transition to other states based on local sensor data
+        if (currentSensors.ballThreatLevel > 0.4f) {
+            robotState.previousState = GoalkeeperStateEnum::COORDINATING_DEFENSE;
+            robotState.currentState = GoalkeeperStateEnum::TRACKING_BALL;
+        }
+    }
+    
+    // --- Performance and System Functions ---
+    void updatePerformanceMetrics() {
+        frameCount++;
+        unsigned long loopTime = micros() - loopStartTime;
+        
+        // Calculate average loop time using a moving average
+        averageLoopTime = (averageLoopTime * 0.9f) + (loopTime / 1000.0f * 0.1f);
+        
+        // Update robot state performance metrics
+        robotState.loopFrequency = 1000.0f / averageLoopTime;
+        robotState.cpuUsage = scheduler.getCPUUsage();
+        // Placeholder for actual memory usage if available
+        robotState.memoryUsage = 40; // Simulated memory usage %
+        robotState.totalRunTime = millis();
+    }
+    
+    void resetWatchdog() {
+        robotState.lastWatchdogReset = millis();
+        // In a real system, you'd also kick a hardware watchdog timer here.
+    }
+};
+
+// ============================================================================
+// ARDUINO MAIN FUNCTIONS
+// ============================================================================
+
+F2SAdvancedGoalkeeper robot;
+
+void setup() {
+    // Initialize random seed (important for AI exploration)
+    randomSeed(analogRead(A0));
+    
+    // Initialize robot
+    if (!robot.initialize()) {
+        Serial.println("Robot initialization failed. Halting system.");
+        // If initialization fails, loop indefinitely to indicate error
+        while (true) {
+            delay(1000);
+        }
+    }
+}
+
+void loop() {
+    // The main loop simply calls the robot's run method, which in turn
+    // delegates to the task scheduler and main control loop.
+    robot.run();
+    
+    // A small delay to ensure other low-priority tasks can run or prevent
+    // busy-waiting from consuming all CPU if tasks are very fast.
+    delayMicroseconds(Config::MAIN_LOOP_INTERVAL); 
+}
