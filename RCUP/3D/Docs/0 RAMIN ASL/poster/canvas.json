@@ -1,0 +1,17 @@
+{
+  "artboards": [
+    {
+      "file": "Main.dc.html",
+      "x": 0,
+      "y": 0,
+      "w": 2245,
+      "h": 3178,
+      "title": "پوستر ربات پرایمری",
+      "print": "fixed"
+    }
+  ],
+  "launch": {
+    "view": "focused",
+    "file": "Main.dc.html"
+  }
+}

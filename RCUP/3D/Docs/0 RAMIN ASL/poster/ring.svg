@@ -1,0 +1,60 @@
+<svg viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto;display:block">
+<circle cx="300" cy="300" r="158" fill="#0A1710" stroke="#2BEA7C" stroke-width="2.5"/>
+<circle cx="300" cy="300" r="218" fill="none" stroke="#157F47" stroke-width="1.5" stroke-dasharray="5 8"/>
+<line x1="300.0" y1="148.0" x2="300.0" y2="118.0" stroke="#157F47" stroke-width="1.2"/>
+<line x1="358.2" y1="159.6" x2="369.6" y2="131.9" stroke="#157F47" stroke-width="1.2"/>
+<line x1="407.5" y1="192.5" x2="428.7" y2="171.3" stroke="#157F47" stroke-width="1.2"/>
+<line x1="440.4" y1="241.8" x2="468.1" y2="230.4" stroke="#157F47" stroke-width="1.2"/>
+<line x1="452.0" y1="300.0" x2="482.0" y2="300.0" stroke="#157F47" stroke-width="1.2"/>
+<line x1="440.4" y1="358.2" x2="468.1" y2="369.6" stroke="#157F47" stroke-width="1.2"/>
+<line x1="407.5" y1="407.5" x2="428.7" y2="428.7" stroke="#157F47" stroke-width="1.2"/>
+<line x1="358.2" y1="440.4" x2="369.6" y2="468.1" stroke="#157F47" stroke-width="1.2"/>
+<line x1="300.0" y1="452.0" x2="300.0" y2="482.0" stroke="#157F47" stroke-width="1.2"/>
+<line x1="241.8" y1="440.4" x2="230.4" y2="468.1" stroke="#157F47" stroke-width="1.2"/>
+<line x1="192.5" y1="407.5" x2="171.3" y2="428.7" stroke="#157F47" stroke-width="1.2"/>
+<line x1="159.6" y1="358.2" x2="131.9" y2="369.6" stroke="#157F47" stroke-width="1.2"/>
+<line x1="148.0" y1="300.0" x2="118.0" y2="300.0" stroke="#157F47" stroke-width="1.2"/>
+<line x1="159.6" y1="241.8" x2="131.9" y2="230.4" stroke="#157F47" stroke-width="1.2"/>
+<line x1="192.5" y1="192.5" x2="171.3" y2="171.3" stroke="#157F47" stroke-width="1.2"/>
+<line x1="241.8" y1="159.6" x2="230.4" y2="131.9" stroke="#157F47" stroke-width="1.2"/>
+<g transform="translate(300.0 104.0) rotate(0.0)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="#F2C94C" stroke="#F2C94C" stroke-width="2.5"/></g>
+<text x="300.0" y="52.0" fill="#F2C94C" font-size="22" font-weight="700" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">0</text>
+<g transform="translate(375.0 118.9) rotate(22.5)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="394.9" y="70.9" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">1</text>
+<g transform="translate(438.6 161.4) rotate(45.0)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="475.4" y="124.6" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">2</text>
+<g transform="translate(481.1 225.0) rotate(67.5)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="#2BEA7C" stroke="#2BEA7C" stroke-width="2.5"/></g>
+<text x="529.1" y="205.1" fill="#2BEA7C" font-size="22" font-weight="700" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">3</text>
+<g transform="translate(496.0 300.0) rotate(90.0)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="548.0" y="300.0" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">4</text>
+<g transform="translate(481.1 375.0) rotate(112.5)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="529.1" y="394.9" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">5</text>
+<g transform="translate(438.6 438.6) rotate(135.0)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="475.4" y="475.4" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">6</text>
+<g transform="translate(375.0 481.1) rotate(157.5)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="394.9" y="529.1" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">7</text>
+<g transform="translate(300.0 496.0) rotate(180.0)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="300.0" y="548.0" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">8</text>
+<g transform="translate(225.0 481.1) rotate(202.5)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="205.1" y="529.1" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">9</text>
+<g transform="translate(161.4 438.6) rotate(225.0)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="124.6" y="475.4" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">10</text>
+<g transform="translate(118.9 375.0) rotate(247.5)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="70.9" y="394.9" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">11</text>
+<g transform="translate(104.0 300.0) rotate(270.0)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="52.0" y="300.0" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">12</text>
+<g transform="translate(118.9 225.0) rotate(292.5)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="70.9" y="205.1" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">13</text>
+<g transform="translate(161.4 161.4) rotate(315.0)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="124.6" y="124.6" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">14</text>
+<g transform="translate(225.0 118.9) rotate(337.5)"><rect x="-13" y="-10" width="26" height="20" rx="4" fill="none" stroke="#157F47" stroke-width="2.5"/></g>
+<text x="205.1" y="70.9" fill="#7FA890" font-size="22" font-weight="500" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">15</text>
+<path d="M 300.0 120.0 A 180 180 0 0 1 368.9 133.7" fill="none" stroke="#F2C94C" stroke-width="3"/>
+<text x="342.1" y="88.2" fill="#F2C94C" font-size="24" font-weight="700" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" dominant-baseline="central">22.5&#176;</text>
+<defs><marker id="rh" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2BEA7C"/></marker></defs>
+<line x1="300" y1="300" x2="427.5" y2="352.8" stroke="#2BEA7C" stroke-width="5" marker-end="url(#rh)"/>
+<circle cx="300" cy="300" r="7" fill="#2BEA7C"/>
+<text x="300" y="358" fill="#EAF6EE" font-size="25" font-weight="700" font-family="Vazirmatn, Tahoma, sans-serif" text-anchor="middle">&#1580;&#1607;&#1578; &#1581;&#1585;&#1705;&#1578;</text>
+<text x="300" y="392" fill="#2BEA7C" font-size="24" font-weight="700" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" direction="ltr">move(3 + 2)</text>
+<text x="300" y="214" fill="#F2C94C" font-size="23" font-weight="700" font-family="Space Grotesk, ui-monospace, monospace" text-anchor="middle" direction="ltr">FRONT &#183; 0</text>
+</svg>
